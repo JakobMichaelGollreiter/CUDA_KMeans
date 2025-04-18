@@ -29,6 +29,6 @@ Create a build directory and run CMake: mkdir -p cmake_build; cd cmake_build; cm
 
 ## Usage
 Run the program with an optional seed parameter for reproducible results:
-bash./build/kmeans_serial [seed]
+salloc -N 1 -A mp309 -t 01:00 -q debug --qos=interactive -C cpu srun -N 1 cmake_build/build/kmeans_serial 12345
 
 

@@ -39,7 +39,7 @@ private:
     double updateCentroids();
 
 public:
-    KMeans(int numClusters, int maxIter = 100, double eps = 1e-4);
+    KMeans(int numClusters, int maxIter = 300, double eps = 1e-4);
     
     // Add a data point to the dataset
     void addPoint(const std::vector<double>& features);

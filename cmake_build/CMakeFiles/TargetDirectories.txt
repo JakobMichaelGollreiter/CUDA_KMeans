@@ -1,0 +1,3 @@
+/Users/jakob/Documents/berkeley_courses/CS267/cuda_kmeans/cmake_build/CMakeFiles/kmeans_serial.dir
+/Users/jakob/Documents/berkeley_courses/CS267/cuda_kmeans/cmake_build/CMakeFiles/edit_cache.dir
+/Users/jakob/Documents/berkeley_courses/CS267/cuda_kmeans/cmake_build/CMakeFiles/rebuild_cache.dir

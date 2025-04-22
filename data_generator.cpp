@@ -1,7 +1,21 @@
 #include "data_generator.h"
 
 // Constructor with optional seed
-DataGenerator::DataGenerator(unsigned seed) : gen(seed) {}
+DataGenerator::DataGenerator(unsigned int seed) : seed(seed), gen(seed) {
+    std::cout << "Data generator initialized with seed: " << seed << std::endl;
+}
+
+// Get the current seed value
+unsigned int DataGenerator::getSeed() const {
+    return seed;
+}
+
+// Reset the generator with a new seed
+void DataGenerator::setSeed(unsigned int newSeed) {
+    seed = newSeed;
+    gen.seed(seed);
+    std::cout << "Data generator reset with new seed: " << seed << std::endl;
+}
 
 // Generate Gaussian clusters
 std::vector<std::vector<double>> DataGenerator::generateGaussianClusters(
@@ -12,6 +26,8 @@ std::vector<std::vector<double>> DataGenerator::generateGaussianClusters(
     std::vector<std::vector<double>> dataPoints;
     int numClusters = clusterCenters.size();
     int dimensions = clusterCenters[0].size();
+    
+    std::cout << "Generating points with seed: " << seed << std::endl;
     
     // Generate points for each cluster
     for (int c = 0; c < numClusters; c++) {

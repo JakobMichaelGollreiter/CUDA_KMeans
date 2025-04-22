@@ -9,10 +9,17 @@
 class DataGenerator {
 private:
     std::mt19937 gen;  // Mersenne Twister random generator
+    unsigned int seed;  // Stored seed value for reproducibility
     
 public:
-    // Constructor
-    DataGenerator(unsigned seed = std::random_device{}());
+    // Constructor with optional seed (default is random)
+    DataGenerator(unsigned int seed = std::random_device{}());
+    
+    // Get the current seed value
+    unsigned int getSeed() const;
+    
+    // Reset the generator with a new seed
+    void setSeed(unsigned int newSeed);
     
     // Generate Gaussian clusters
     std::vector<std::vector<double>> generateGaussianClusters(

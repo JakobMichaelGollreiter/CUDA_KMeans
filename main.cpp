@@ -2,12 +2,24 @@
 #include "data_generator.h"
 #include <vector>
 #include <iostream>
+#include <string>
 
-int main() {
+int main(int argc, char* argv[]) {
     // Parameters for clustering
     int numClusters = 3;
-    // We set dimensions from the cluster centers
     int pointsPerCluster = 10;
+    
+    // Seed for reproducibility (default: 12345)
+    unsigned int seed = 12345;
+    
+    // Allow seed to be specified as command line argument
+    if (argc > 1) {
+        try {
+            seed = std::stoi(argv[1]);
+        } catch (const std::exception& e) {
+            std::cerr << "Invalid seed parameter. Using default: " << seed << std::endl;
+        }
+    }
     
     // Create a KMeans instance
     KMeans kmeans(numClusters);
@@ -18,18 +30,16 @@ int main() {
         {8.0, 8.0},     // Cluster 1 center
         {-5.0, -5.0}    // Cluster 2 center
     };
-    // Get dimensions from cluster centers and pass to the data generator
-    // without keeping a separate variable
     
     // Standard deviations for each cluster
     std::vector<double> stdDevs = {0.1, 0.2, 0.8};
     
-    // Initialize data generator with random seed
-    DataGenerator generator;
+    // Initialize data generator with specified seed
+    DataGenerator generator(seed);
     
     // Print information about the clusters we're generating
     std::cout << "Generating " << pointsPerCluster << " points for each of " 
-              << numClusters << " clusters...\n";
+              << numClusters << " clusters with seed " << seed << "...\n";
     generator.printClusterInfo(clusterCenters, stdDevs);
     
     // Generate synthetic data points
@@ -91,7 +101,7 @@ int main() {
                 std::cout << ")" << std::endl;
                 
                 count++;
-                if (count >= 5) break;  // Show only first 5 points per cluster
+                // if (count >= 5) break;  // Show only first 5 points per cluster
             }
         }
     }

@@ -13,5 +13,5 @@ add_executable(kmeans_serial
 # Set output directory
 set_target_properties(kmeans_serial
     PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/build"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
 )

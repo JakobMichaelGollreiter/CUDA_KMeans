@@ -331,6 +331,15 @@ bool KMeans::saveCentroidsToCSV(const std::string& filename, char delimiter) con
         return false;
     }
     
+    // Write header
+    for (size_t i = 0; i < centroids[0].size(); i++) {
+        file << "feature" << i;
+        if (i < centroids[0].size() - 1) {
+            file << delimiter;
+        }
+    }
+    file << std::endl;
+    
     // Write each centroid
     for (const auto& centroid : centroids) {
         for (size_t i = 0; i < centroid.size(); i++) {

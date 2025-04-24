@@ -41,6 +41,9 @@ bool KMeans::loadDataFromCSV(const std::string& filename, char delimiter) {
     points.clear();
     std::string line;
     
+    // Skip header row
+    std::getline(file, line);
+    
     // Process each line in the CSV file
     while (std::getline(file, line)) {
         std::stringstream ss(line);
@@ -58,8 +61,9 @@ bool KMeans::loadDataFromCSV(const std::string& filename, char delimiter) {
             }
         }
         
-        // Add point if we have valid features
+        // Add point if we have valid features, but ignore the last column
         if (!features.empty()) {
+            features.pop_back();  // Remove the last column
             addPoint(features);
         }
     }
@@ -77,22 +81,26 @@ bool KMeans::loadDataFromCSV(const std::string& filename, char delimiter) {
 }
 
 // Load initial centroids from CSV file
+// Load initial centroids from CSV file
 bool KMeans::loadCentroidsFromCSV(const std::string& filename, char delimiter) {
     std::ifstream file(filename);
     if (!file.is_open()) {
         std::cerr << "Error: Could not open file " << filename << std::endl;
         return false;
     }
-    
+
     std::vector<std::vector<double>> initialCentroids;
     std::string line;
-    
+
+    // Skip header row
+    std::getline(file, line);
+
     // Process each line in the CSV file
     while (std::getline(file, line)) {
         std::stringstream ss(line);
         std::string token;
         std::vector<double> centroid;
-        
+
         // Process each value in the line
         while (std::getline(ss, token, delimiter)) {
             try {
@@ -103,22 +111,22 @@ bool KMeans::loadCentroidsFromCSV(const std::string& filename, char delimiter) {
                 return false;
             }
         }
-        
+
         // Add centroid if we have valid features
         if (!centroid.empty()) {
             initialCentroids.push_back(centroid);
         }
     }
-    
+
     file.close();
-    
+
     // Check if we have the right number of centroids
     if (initialCentroids.size() != static_cast<size_t>(k)) {
         std::cerr << "Error: Number of centroids in file (" << initialCentroids.size() 
                   << ") doesn't match k (" << k << ")" << std::endl;
         return false;
     }
-    
+
     // Check if dimensions match
     if (!points.empty() && !initialCentroids.empty() && 
         points[0].features.size() != initialCentroids[0].size()) {
@@ -127,10 +135,10 @@ bool KMeans::loadCentroidsFromCSV(const std::string& filename, char delimiter) {
                   << initialCentroids[0].size() << ")" << std::endl;
         return false;
     }
-    
+
     // Set the centroids
     setCentroids(initialCentroids);
-    
+
     std::cout << "Successfully loaded " << initialCentroids.size() 
               << " centroids from " << filename << std::endl;
     return true;
@@ -294,7 +302,7 @@ double KMeans::calculateSSE() const {
     return sse;
 }
 
-// Save cluster assignments to CSV file
+// Save cluster assignments to CSV file (only cluster column)
 bool KMeans::saveClusterAssignmentsToCSV(const std::string& filename, char delimiter) const {
     std::ofstream file(filename);
     if (!file.is_open()) {
@@ -302,20 +310,12 @@ bool KMeans::saveClusterAssignmentsToCSV(const std::string& filename, char delim
         return false;
     }
     
-    // Write header
-    file << "cluster";
-    for (size_t i = 0; i < points[0].features.size(); i++) {
-        file << delimiter << "feature" << i;
-    }
-    file << std::endl;
+    // Write header - only cluster
+    file << "cluster" << std::endl;
     
-    // Write each point with its cluster assignment
+    // Write each point's cluster assignment only
     for (const auto& point : points) {
-        file << point.cluster;
-        for (const auto& feature : point.features) {
-            file << delimiter << feature;
-        }
-        file << std::endl;
+        file << point.cluster << std::endl;
     }
     
     file.close();

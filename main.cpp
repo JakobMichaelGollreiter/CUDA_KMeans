@@ -4,6 +4,25 @@
 #include <string>
 #include <stdexcept>
 
+#include <sys/stat.h>  // For mkdir
+#include <unistd.h>    // For access
+
+
+// Extract filename without extension
+std::string getFilenameStem(const std::string& path) {
+    size_t lastSlash = path.find_last_of("/\\");
+    size_t lastDot = path.find_last_of('.');
+    if (lastDot == std::string::npos || lastDot < lastSlash) lastDot = path.length();
+    return path.substr(lastSlash + 1, lastDot - lastSlash - 1);
+}
+
+// Create directory if it doesn't exist
+void makeDirectory(const std::string& dir) {
+    if (access(dir.c_str(), F_OK) != 0) {
+        mkdir(dir.c_str(), 0755); // 0755 = rwxr-xr-x
+    }
+}
+
 int main(int argc, char* argv[]) {
     // Check command line arguments
     if (argc < 3 || argc > 5) {
@@ -99,13 +118,24 @@ int main(int argc, char* argv[]) {
         
         std::cout << "\nSum of Squared Errors (SSE): " << kmeans.calculateSSE() << std::endl;
         
-        // Save results to CSV files
-        std::string outputClustersFile = dataFile + ".clusters.csv";
-        std::string outputCentroidsFile = dataFile + ".centroids.csv";
-        
+        // Extract filename
+        std::string filename = getFilenameStem(dataFile);
+
+        // Create output directories
+        std::string clusteOutputDir = "../label_predictions";
+        std::string centroidsOutputDir = "../center_predictions";
+
+        makeDirectory(clusteOutputDir);
+        makeDirectory(centroidsOutputDir);
+
+        // Construct file paths
+        std::string outputClustersFile =  clusteOutputDir + "/" + filename + "_labels.csv";
+        std::string outputCentroidsFile =  centroidsOutputDir + "/" + filename + "_centers.csv";
+
         kmeans.saveClusterAssignmentsToCSV(outputClustersFile);
         kmeans.saveCentroidsToCSV(outputCentroidsFile);
-        
+
+            
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;

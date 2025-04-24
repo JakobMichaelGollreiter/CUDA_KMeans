@@ -8,7 +8,7 @@ import argparse
 def ensure_dir(directory):
     """Create directory if it doesn't exist."""
     if not os.path.exists(directory):
-        os.makedirs(directory, exist_ok=True)
+        os.makedirs(directory)
 
 def run_kmeans(dataset_path, init_centers_path, n_clusters, max_iterations=3):
     """Run KMeans clustering and save results."""
@@ -24,12 +24,12 @@ def run_kmeans(dataset_path, init_centers_path, n_clusters, max_iterations=3):
     # Load data
     df = pd.read_csv(dataset_path, header=0)
     X = df.iloc[:, :-1].values  # Exclude the last column (labels)
-    print(f"Data shape: {X.shape}")
+    print("Data shape: {}".format(X.shape))
     
     # Load initial centers
     init_df = pd.read_csv(init_centers_path, header=0)
     initial_centers = init_df.values
-    print(f"Initial centers shape: {initial_centers.shape}")
+    print("Initial centers shape: {}".format(initial_centers.shape))
     
     # Time KMeans fitting
     start_time = time.time()
@@ -37,25 +37,25 @@ def run_kmeans(dataset_path, init_centers_path, n_clusters, max_iterations=3):
     kmeans.fit(X)
     elapsed_time = time.time() - start_time
     
-    print(f"KMeans fitting time: {elapsed_time:.6f} seconds")
-    print(f"Number of iterations: {kmeans.n_iter_}")
+    print("KMeans fitting time: {:.6f} seconds".format(elapsed_time))
+    print("Number of iterations: {}".format(kmeans.n_iter_))
     
     # Save cluster centers
-    centers_filename = f"scikit_centers_{dataset_name}.csv"
+    centers_filename = "scikit_centers_{}.csv".format(dataset_name)
     centers_path = os.path.join(centers_dir, centers_filename)
     centers_df = pd.DataFrame(
         kmeans.cluster_centers_, 
-        columns=[f'f{i}' for i in range(kmeans.cluster_centers_.shape[1])]
+        columns=['f{}'.format(i) for i in range(kmeans.cluster_centers_.shape[1])]
     )
     centers_df.to_csv(centers_path, index=False)
-    print(f"Centers saved to: {centers_path}")
+    print("Centers saved to: {}".format(centers_path))
     
     # Save labels
-    labels_filename = f"scikit_labels_{dataset_name}.csv"
+    labels_filename = "scikit_labels_{}.csv".format(dataset_name)
     labels_path = os.path.join(labels_dir, labels_filename)
     labels_df = pd.DataFrame(kmeans.labels_, columns=['label'])
     labels_df.to_csv(labels_path, index=False)
-    print(f"Labels saved to: {labels_path}")
+    print("Labels saved to: {}".format(labels_path))
     
     return kmeans, elapsed_time
 

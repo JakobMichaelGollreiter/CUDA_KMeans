@@ -6,6 +6,8 @@
 
 #include <sys/stat.h>  // For mkdir
 #include <unistd.h>    // For access
+#include <chrono>
+
 
 
 // Extract filename without extension
@@ -85,8 +87,22 @@ int main(int argc, char* argv[]) {
         
         // Run the clustering algorithm
         std::cout << "\nRunning K-means clustering..." << std::endl;
+
+        // Start timing
+        auto start = std::chrono::high_resolution_clock::now();
+
+        // Run the algorithm
         kmeans.run();
-        
+
+        // End timing
+        auto end = std::chrono::high_resolution_clock::now();
+
+        // Calculate the duration
+        std::chrono::duration<double> elapsed = end - start;
+        std::cout << "\nElapsed time: " << elapsed.count() << " seconds" << std::endl;
+        std::cout << "Clustering completed." << std::endl;
+        std::cout << "------------------------" << std::endl;
+
         // Get cluster assignments and centroids
         auto assignments = kmeans.getClusterAssignments();
         auto centroids = kmeans.getCentroids();

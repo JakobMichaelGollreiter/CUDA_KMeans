@@ -10,7 +10,7 @@ def ensure_dir(directory):
     if not os.path.exists(directory):
         os.makedirs(directory, exist_ok=True)
 
-def run_kmeans(dataset_path, init_centers_path, max_iterations=3):
+def run_kmeans(dataset_path, init_centers_path, n_clusters, max_iterations=3):
     """Run KMeans clustering and save results."""
     # Extract dataset name from path for naming output files
     dataset_name = os.path.splitext(os.path.basename(dataset_path))[0]
@@ -29,7 +29,6 @@ def run_kmeans(dataset_path, init_centers_path, max_iterations=3):
     # Load initial centers
     init_df = pd.read_csv(init_centers_path, header=0)
     initial_centers = init_df.values
-    n_clusters = initial_centers.shape[0]
     print(f"Initial centers shape: {initial_centers.shape}")
     
     # Time KMeans fitting
@@ -62,21 +61,22 @@ def run_kmeans(dataset_path, init_centers_path, max_iterations=3):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run KMeans clustering")
-    parser.add_argument("--data", type=str, 
-                        default="kmeans_datasets_csv/blobs_1000x4d_5c_seed1234.csv",
+    parser.add_argument("dataset", type=str, 
                         help="Path to dataset CSV")
-    parser.add_argument("--init", type=str, 
-                        default="kmeans_inits/blobs_1000x4d_5c_seed1234_init_seed1234.csv",
+    parser.add_argument("initialcluster", type=str, 
                         help="Path to initial centers CSV")
-    parser.add_argument("--max-iter", type=int, default=3,
+    parser.add_argument("clusters", type=int,
+                        help="Number of clusters")
+    parser.add_argument("iterations", type=int, default=3, nargs='?',
                         help="Maximum number of KMeans iterations")
     
     args = parser.parse_args()
     
     kmeans_model, runtime = run_kmeans(
-        args.data, 
-        args.init, 
-        args.max_iter
+        args.dataset, 
+        args.initialcluster, 
+        args.clusters,
+        args.iterations
     )
     
     print("\nClustering completed successfully!")

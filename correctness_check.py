@@ -6,11 +6,28 @@ from sklearn.metrics import adjusted_rand_score
 from scipy.optimize import linear_sum_assignment
 
 def load_labels(path, skip_header):
-    data = np.loadtxt(path, delimiter=",", skiprows=1 if skip_header else 0)
+    try:
+        data = np.loadtxt(path, delimiter=",", skiprows=1 if skip_header else 0)
+    except ValueError as e:
+        # If there's an error, try again with skiprows=1 (assuming there's a header)
+        if not skip_header:
+            print(f"Warning: Error loading {path} without header. Trying with header...")
+            data = np.loadtxt(path, delimiter=",", skiprows=1)
+        else:
+            raise e
     return data.astype(int) if data.ndim==1 else data[:,-1].astype(int)
 
 def load_centers(path, skip_header):
-    return np.loadtxt(path, delimiter=",", skiprows=1 if skip_header else 0)
+    try:
+        data = np.loadtxt(path, delimiter=",", skiprows=1 if skip_header else 0)
+    except ValueError as e:
+        # If there's an error, try again with skiprows=1 (assuming there's a header)
+        if not skip_header:
+            print(f"Warning: Error loading {path} without header. Trying with header...")
+            data = np.loadtxt(path, delimiter=",", skiprows=1)
+        else:
+            raise e
+    return data
 
 def avg_center_dist(C_true, C_pred):
     dists = np.linalg.norm(C_true[:,None,:] - C_pred[None,:,:], axis=2)
@@ -42,18 +59,21 @@ def main():
 
     # check labels
     ari = adjusted_rand_score(y_true, y_pred)
-    if ari < 0.999:
-        print(f"FAIL: ARI = {ari:.6f} < 0.999")
-        sys.exit(1)
-
+    ari_check = ari >= 0.999
+    print(f"ARI check: {ari_check}, value = {ari:.6f}, threshold = 0.999")
+    
     # check centers
     avg_dist = avg_center_dist(C_true, C_pred)
-    if avg_dist > args.tol:
-        print(f"FAIL: avg center L2 = {avg_dist:.6e} > tol {args.tol}")
+    dist_check = avg_dist <= args.tol
+    print(f"Center distance check: {dist_check}, value = {avg_dist:.6e}, threshold = {args.tol}")
+    
+    # Final result
+    if ari_check and dist_check:
+        print("Correctness Check: PASS")
+        sys.exit(0)
+    else:
+        print("Correctness Check: FAIL")
         sys.exit(1)
-
-    print("PASS")
-    sys.exit(0)
 
 if __name__ == "__main__":
     main()

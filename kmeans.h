@@ -1,84 +1,157 @@
-#ifndef KMEANS_H
-#define KMEANS_H
-
+#include "kmeans.h"
 #include <vector>
 #include <iostream>
-#include <cmath>
 #include <string>
-#include <fstream>
-#include <sstream>
-#include <limits>
-#include <algorithm>
+#include <stdexcept>
 
-// Class for K-means clustering implementation using Lloyd's algorithm
-class KMeans {
-private:
-    int k;              // Number of clusters
-    int maxIterations;  // Maximum iterations before stopping
-    double epsilon;     // Convergence threshold
+#include <sys/stat.h>  // For mkdir
+#include <unistd.h>    // For access
+#include <chrono>
 
-    // Helper struct for a point in N-dimensional space
-    struct Point {
-        std::vector<double> features;
-        int cluster;
+// Extract filename without extension
+std::string getFilenameStem(const std::string& path) {
+    size_t lastSlash = path.find_last_of("/\\");
+    size_t lastDot = path.find_last_of('.');
+    if (lastDot == std::string::npos || lastDot < lastSlash) lastDot = path.length();
+    return path.substr(lastSlash + 1, lastDot - lastSlash - 1);
+}
 
-        Point(const std::vector<double>& f) : features(f), cluster(-1) {}
-    };
+// Create directory if it doesn't exist
+void makeDirectory(const std::string& dir) {
+    if (access(dir.c_str(), F_OK) != 0) {
+        mkdir(dir.c_str(), 0755); // 0755 = rwxr-xr-x
+    }
+}
 
-    std::vector<Point> points;             // All data points
-    std::vector<std::vector<double>> centroids;  // Cluster centroids
-
-    // Data structures for triangle inequality optimization
-    std::vector<std::vector<double>> pointCentroidDist; // Distance from each point to each centroid
-    std::vector<std::vector<double>> centroidCentroidDist; // Distance between centroids
-    std::vector<double> centroidMovement; // How much each centroid moved in the last iteration
-    std::vector<std::vector<double>> oldCentroids; // Previous iteration's centroids
-
-    // Calculate Euclidean distance between two points
-    double distance(const std::vector<double>& a, const std::vector<double>& b) const;
-
-    // Assign each point to nearest centroid
-    // Returns the number of points that changed clusters
-    int assignClusters();
-
-    // Update centroids based on current cluster assignments
-    void updateCentroids();
-
-    // Update distances between centroids for triangle inequality optimization
-    void updateCentroidDistances();
-
-public:
-    KMeans(int numClusters, int maxIter = 100, double eps = 1e-4);
+int main(int argc, char* argv[]) {
+    // Check command line arguments
+    if (argc < 3 || argc > 5) {
+        std::cerr << "Usage: " << argv[0] << " <data_file.csv> <centroids_file.csv> <num_clusters> [max_iterations]" << std::endl;
+        std::cerr << "  <data_file.csv>    : Path to CSV file containing data points" << std::endl;
+        std::cerr << "  <centroids_file.csv>: Path to CSV file containing initial centroids" << std::endl;
+        std::cerr << "  <num_clusters>     : Number of clusters (k)" << std::endl;
+        std::cerr << "  [max_iterations]   : Maximum iterations (default: 100)" << std::endl;
+        return 1;
+    }
     
-    // Add a data point to the dataset
-    void addPoint(const std::vector<double>& features);
-    
-    // Set centroids directly
-    void setCentroids(const std::vector<std::vector<double>>& initialCentroids);
-    
-    // Load data points from CSV file
-    bool loadDataFromCSV(const std::string& filename, char delimiter = ',');
-    
-    // Load initial centroids from CSV file
-    bool loadCentroidsFromCSV(const std::string& filename, char delimiter = ',');
-    
-    // Run the k-means algorithm
-    void run();
-    
-    // Get cluster assignments
-    std::vector<int> getClusterAssignments() const;
-    
-    // Get centroids
-    const std::vector<std::vector<double>>& getCentroids() const;
-    
-    // Calculate the Sum of Squared Errors (SSE)
-    double calculateSSE() const;
-    
-    // Save cluster assignments to CSV file
-    bool saveClusterAssignmentsToCSV(const std::string& filename, char delimiter = ',') const;
-    
-    // Save final centroids to CSV file
-    bool saveCentroidsToCSV(const std::string& filename, char delimiter = ',') const;
-};
+    try {
+        // Parse command line arguments
+        std::string dataFile = argv[1];
+        std::string centroidsFile = argv[2];
+        
+        int numClusters;
+        try {
+            numClusters = std::stoi(argv[3]);
+        } catch (const std::exception& e) {
+            std::cerr << "Error: Invalid number of clusters. Must be a positive integer." << std::endl;
+            return 1;
+        }
+        
+        if (numClusters <= 0) {
+            std::cerr << "Error: Number of clusters must be positive." << std::endl;
+            return 1;
+        }
+        
+        // Optional argument
+        int maxIterations = 100;  // Default value
+        if (argc >= 5) {
+            try {
+                maxIterations = std::stoi(argv[4]);
+                if (maxIterations <= 0) {
+                    std::cerr << "Error: Maximum iterations must be positive. Using default: 100" << std::endl;
+                    maxIterations = 100;
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "Error: Invalid maximum iterations. Using default: 100" << std::endl;
+            }
+        }
+        
+        // Create a KMeans instance
+        KMeans kmeans(numClusters, maxIterations);
+        
+        // Load data points from CSV file
+        std::cout << "Loading data points from " << dataFile << "..." << std::endl;
+        if (!kmeans.loadDataFromCSV(dataFile)) {
+            std::cerr << "Failed to load data points." << std::endl;
+            return 1;
+        }
+        
+        // Load initial centroids from CSV file
+        std::cout << "Loading initial centroids from " << centroidsFile << "..." << std::endl;
+        if (!kmeans.loadCentroidsFromCSV(centroidsFile)) {
+            std::cerr << "Failed to load centroids." << std::endl;
+            return 1;
+        }
+        
+        // Run the clustering algorithm
+        std::cout << "\nRunning K-means clustering with triangle inequality optimization..." << std::endl;
 
-#endif // KMEANS_H
+        // Start timing
+        auto start = std::chrono::high_resolution_clock::now();
+
+        // Run the algorithm
+        kmeans.run();
+
+        // End timing
+        auto end = std::chrono::high_resolution_clock::now();
+
+        // Calculate the duration
+        std::chrono::duration<double> elapsed = end - start;
+        std::cout << "\nElapsed time: " << elapsed.count() << " seconds" << std::endl;
+        std::cout << "Clustering completed." << std::endl;
+        std::cout << "------------------------" << std::endl;
+
+        // Get cluster assignments and centroids
+        auto assignments = kmeans.getClusterAssignments();
+        auto centroids = kmeans.getCentroids();
+        
+        // Print each cluster's centroid
+        std::cout << "\nFinal cluster centroids:" << std::endl;
+        std::cout << "-----------------------" << std::endl;
+        for (size_t i = 0; i < centroids.size(); i++) {
+            std::cout << "Centroid " << i << ": (";
+            for (size_t j = 0; j < centroids[i].size(); j++) {
+                std::cout << centroids[i][j];
+                if (j < centroids[i].size() - 1) std::cout << ", ";
+            }
+            std::cout << ")" << std::endl;
+        }
+        
+        // Count points in each cluster
+        std::vector<int> clusterCounts(numClusters, 0);
+        for (int cluster : assignments) {
+            clusterCounts[cluster]++;
+        }
+        
+        // Print cluster statistics
+        std::cout << "\nCluster point counts:" << std::endl;
+        std::cout << "---------------------" << std::endl;
+        for (int i = 0; i < numClusters; i++) {
+            std::cout << "Cluster " << i << ": " << clusterCounts[i] << " points" << std::endl;
+        }
+        
+        std::cout << "\nSum of Squared Errors (SSE): " << kmeans.calculateSSE() << std::endl;
+        
+        // Extract filename
+        std::string filename = getFilenameStem(dataFile);
+
+        // Create output directories
+        std::string clusteOutputDir = "../label_predictions";
+        std::string centroidsOutputDir = "../center_predictions";
+
+        makeDirectory(clusteOutputDir);
+        makeDirectory(centroidsOutputDir);
+
+        // Construct file paths
+        std::string outputClustersFile =  clusteOutputDir + "/" + filename + "_labels.csv";
+        std::string outputCentroidsFile =  centroidsOutputDir + "/" + filename + "_centers.csv";
+
+        kmeans.saveClusterAssignmentsToCSV(outputClustersFile);
+        kmeans.saveCentroidsToCSV(outputCentroidsFile);
+            
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "Error: " << e.what() << std::endl;
+        return 1;
+    }
+}

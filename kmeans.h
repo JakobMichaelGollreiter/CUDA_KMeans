@@ -28,6 +28,12 @@ private:
     std::vector<Point> points;             // All data points
     std::vector<std::vector<double>> centroids;  // Cluster centroids
 
+    // Data structures for triangle inequality optimization
+    std::vector<std::vector<double>> pointCentroidDist; // Distance from each point to each centroid
+    std::vector<std::vector<double>> centroidCentroidDist; // Distance between centroids
+    std::vector<double> centroidMovement; // How much each centroid moved in the last iteration
+    std::vector<std::vector<double>> oldCentroids; // Previous iteration's centroids
+
     // Calculate Euclidean distance between two points
     double distance(const std::vector<double>& a, const std::vector<double>& b) const;
 
@@ -37,6 +43,9 @@ private:
 
     // Update centroids based on current cluster assignments
     void updateCentroids();
+
+    // Update distances between centroids for triangle inequality optimization
+    void updateCentroidDistances();
 
 public:
     KMeans(int numClusters, int maxIter = 100, double eps = 1e-4);

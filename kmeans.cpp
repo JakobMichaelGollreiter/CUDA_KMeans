@@ -14,6 +14,7 @@ double KMeans::distance(const std::vector<double>& a, const std::vector<double>&
     return std::sqrt(sum);
 }
 
+
 // Add a data point to the dataset
 void KMeans::addPoint(const std::vector<double>& features) {
     points.emplace_back(features);
@@ -28,6 +29,8 @@ void KMeans::setCentroids(const std::vector<std::vector<double>>& initialCentroi
     }
     
     centroids = initialCentroids;
+    // Store a copy for centroid movement calculations
+    oldCentroids = centroids;
 }
 
 // Load data points from CSV file
@@ -80,7 +83,6 @@ bool KMeans::loadDataFromCSV(const std::string& filename, char delimiter) {
     return true;
 }
 
-// Load initial centroids from CSV file
 // Load initial centroids from CSV file
 bool KMeans::loadCentroidsFromCSV(const std::string& filename, char delimiter) {
     std::ifstream file(filename);
@@ -144,27 +146,100 @@ bool KMeans::loadCentroidsFromCSV(const std::string& filename, char delimiter) {
     return true;
 }
 
-// Assign each point to nearest centroid
+// Update distances between centroids for triangle inequality optimization
+void KMeans::updateCentroidDistances() {
+    // Resize if needed
+    if (centroidCentroidDist.size() != static_cast<size_t>(k)) {
+        centroidCentroidDist.resize(k, std::vector<double>(k, 0.0));
+    }
+    
+    // Compute distances between all centroids
+    for (int i = 0; i < k; i++) {
+        centroidCentroidDist[i][i] = 0.0;  // Distance to self is 0
+        for (int j = i + 1; j < k; j++) {
+            
+            double dist = distance(centroids[i], centroids[j]);
+            centroidCentroidDist[i][j] = dist;
+            centroidCentroidDist[j][i] = dist; // Symmetric
+        }
+    }
+    
+    // Compute how much each centroid moved since last iteration
+    if (centroidMovement.size() != static_cast<size_t>(k)) {
+        centroidMovement.resize(k, std::numeric_limits<double>::max());
+    } else if (!oldCentroids.empty()) {
+        for (int i = 0; i < k; i++) {
+            centroidMovement[i] = distance(oldCentroids[i], centroids[i]);
+        }
+    }
+    
+    // Save current centroids for next iteration
+    oldCentroids = centroids;
+}
+
+// Assign each point to nearest centroid using triangle inequality optimization
 int KMeans::assignClusters() {
     int changes = 0;
     
-    for (auto& point : points) {
+    // Initialize or resize distance data structures if needed
+    if (pointCentroidDist.size() != points.size()) {
+        pointCentroidDist.resize(points.size(), std::vector<double>(k, std::numeric_limits<double>::max()));
+    }
+    
+    // Update distances between centroids
+    updateCentroidDistances();
+    
+    for (size_t p = 0; p < points.size(); p++) {
+        auto& point = points[p];
         double minDist = std::numeric_limits<double>::max();
+        int oldCluster = point.cluster;
         int closestCluster = -1;
         
-        for (int i = 0; i < k; i++) {
+        // First, check the current assigned cluster and compute distance
+        if (oldCluster != -1) {
             // Check for dimension mismatch
-            if (point.features.size() != centroids[i].size()) {
-                std::cerr << "Error: Dimension mismatch between point (" 
-                          << point.features.size() << ") and centroid " 
-                          << i << " (" << centroids[i].size() << ")" << std::endl;
+            if (point.features.size() != centroids[oldCluster].size()) {
+                std::cerr << "Error: Dimension mismatch between point and centroid" << std::endl;
                 continue;
             }
             
-            double dist = distance(point.features, centroids[i]);
-            if (dist < minDist) {
-                minDist = dist;
-                closestCluster = i;
+            // Compute distance to current cluster
+            double dist = distance(point.features, centroids[oldCluster]);
+            pointCentroidDist[p][oldCluster] = dist;
+            minDist = dist;
+            closestCluster = oldCluster;
+        }
+        
+        // Check other clusters using triangle inequality
+        for (int i = 0; i < k; i++) {
+            if (i == oldCluster) continue; // Skip current cluster, already computed
+            
+            // Only compute the distance if the triangle inequality suggests it could be closer
+            bool needsComputation = true;
+            
+            if (oldCluster != -1) {
+                // If we can't prove the current centroid is closer, we need to compute the distance
+                // Using the triangle inequality: d(p,c_i) >= |d(p,c_old) - d(c_old,c_i)|
+                // If d(p,c_old) - d(c_old,c_i) > minDist, then c_i cannot be closer than the current min
+                double lowerBound = std::abs(pointCentroidDist[p][oldCluster] - centroidCentroidDist[oldCluster][i]);
+                
+                // Account for centroid movement
+                lowerBound -= (centroidMovement[oldCluster] + centroidMovement[i]);
+                
+                if (lowerBound >= minDist) {
+                    needsComputation = false;
+                }
+            }
+            
+            if (needsComputation) {
+                // Calculate actual distance
+                double dist = distance(point.features, centroids[i]);
+                pointCentroidDist[p][i] = dist;
+                
+                if (dist < minDist) {
+                    minDist = dist;
+                    closestCluster = i;
+                }
             }
         }
         
@@ -187,6 +262,9 @@ int KMeans::assignClusters() {
 // Update centroids based on current cluster assignments
 void KMeans::updateCentroids() {
     size_t dimensions = points[0].features.size();
+    
+    // Store old centroids for movement calculation
+    oldCentroids = centroids;
     
     // Reset centroids to zero and count the number of points in each cluster
     std::vector<std::vector<double>> newCentroids(k, std::vector<double>(dimensions, 0.0));
@@ -251,6 +329,12 @@ void KMeans::run() {
             return;
         }
     }
+    
+    // Initialize data structures for triangle inequality optimization
+    pointCentroidDist.resize(points.size(), std::vector<double>(k, std::numeric_limits<double>::max()));
+    centroidCentroidDist.resize(k, std::vector<double>(k, 0.0));
+    centroidMovement.resize(k, std::numeric_limits<double>::max());
+    oldCentroids = centroids;
     
     // Main Lloyd's algorithm loop
     int iterations = 0;

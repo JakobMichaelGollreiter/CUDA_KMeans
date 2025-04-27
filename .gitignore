@@ -1,0 +1,11 @@
+# Ignore all CSV files
+*.csv
+
+# (Optional) Also ignore these folders if you want cleaner repo
+kmeans_datasets_csv/
+kmeans_groundtruth/
+kmeans_inits/
+center_predictions/
+label_predictions/
+scikit_center_predictions/
+scikit_label_predictions/

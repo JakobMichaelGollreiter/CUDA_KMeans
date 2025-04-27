@@ -33,7 +33,7 @@ def run_kmeans(dataset_path, init_centers_path, n_clusters, max_iterations=3):
     
     # Time KMeans fitting
     start_time = time.time()
-    kmeans = KMeans(n_clusters=n_clusters, init=initial_centers, n_init=1, max_iter=max_iterations)
+    kmeans = KMeans(n_clusters=n_clusters, init=initial_centers,tol=0.000, n_init=1, max_iter=max_iterations)
     kmeans.fit(X)
     elapsed_time = time.time() - start_time
     

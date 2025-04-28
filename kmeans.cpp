@@ -209,8 +209,6 @@ bool KMeans::loadCentroidsFromCSV(const std::string& filename, char delimiter) {
 void KMeans::allocateGPUMemory() {
     if (!useGPU) return;
     
-  
-    
     numPoints = points.size();
     dimensions = points[0].features.size();
     
@@ -248,8 +246,8 @@ void KMeans::freeGPUMemory() {
     d_counts = nullptr;
 }
 
-// Copy data to GPU
-void KMeans::copyToGPU() {
+// Copy initial data to GPU - called once at the beginning
+void KMeans::copyInitialDataToGPU() {
     if (!useGPU) return;
     
     // Copy points to device
@@ -269,17 +267,10 @@ void KMeans::copyToGPU() {
         }
     }
     cudaMemcpy(d_centroids, h_centroids_flat.data(), k * dimensions * sizeof(float), cudaMemcpyHostToDevice);
-    
-    // Copy assignments to device
-    std::vector<int> h_assignments(numPoints);
-    for (size_t i = 0; i < numPoints; i++) {
-        h_assignments[i] = points[i].cluster;
-    }
-    cudaMemcpy(d_assignments, h_assignments.data(), numPoints * sizeof(int), cudaMemcpyHostToDevice);
 }
 
-// Copy results from GPU
-void KMeans::copyFromGPU() {
+// Copy final results from GPU - called once at the end
+void KMeans::copyFinalResultsFromGPU() {
     if (!useGPU) return;
     
     // Copy assignments back to host
@@ -343,9 +334,7 @@ int KMeans::assignClustersCPU() {
 
 // Assign clusters - GPU version
 int KMeans::assignClustersGPU() {
-   
-    
-    // Call CUDA kernel
+    // Call CUDA kernel - all processing stays on GPU
     return assignClustersKernel(
         d_points, d_centroids, d_assignments, d_changes,
         static_cast<int>(numPoints), k, static_cast<int>(dimensions)
@@ -403,9 +392,7 @@ void KMeans::updateCentroidsCPU() {
 
 // Update centroids - GPU version
 void KMeans::updateCentroidsGPU() {
-
-    
-    // Call CUDA kernel
+    // Call CUDA kernel - all processing stays on GPU
     updateCentroidsKernel(
         d_points, d_centroids, d_assignments, d_counts,
         static_cast<int>(numPoints), k, static_cast<int>(dimensions)
@@ -449,10 +436,11 @@ void KMeans::run() {
         }
     }
     
-    // If using GPU, allocate memory and copy data
+    // If using GPU, allocate memory and copy data once at the beginning
     if (useGPU) {
+        std::cout << "Using GPU implementation for k-means clustering" << std::endl;
         allocateGPUMemory();
-        copyToGPU();
+        copyInitialDataToGPU(); // Copy data to GPU only once
     } else {
         std::cout << "Using CPU implementation for k-means clustering" << std::endl;
     }
@@ -462,10 +450,10 @@ void KMeans::run() {
     int changes;
     
     do {
-        // Assign points to nearest centroids
+        // Assign points to nearest centroids - all on GPU if useGPU is true
         changes = assignClusters();
         
-        // Update centroids based on assigned points
+        // Update centroids based on assigned points - all on GPU if useGPU is true
         updateCentroids();
         
         iterations++;
@@ -474,11 +462,10 @@ void KMeans::run() {
         
     } while (changes > 0 && iterations < maxIterations);
     
-    // If using GPU, copy results back
+    // If using GPU, copy results back once at the end
     if (useGPU) {
-        copyFromGPU();
-        freeGPUMemory();
-        
+        copyFinalResultsFromGPU(); // Copy results back to host once at the end
+        freeGPUMemory();  
     }
     
     std::cout << "K-means converged after " << iterations << " iterations." << std::endl;

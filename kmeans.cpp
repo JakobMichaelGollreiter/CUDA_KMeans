@@ -628,9 +628,9 @@ void KMeans::updateCentroidsCPU() {
     }
 }
 
-// Update centroids - GPU version - Updated for SoA layout
+// Update centroids - GPU version - Updated for SoA layout and using two-step reduction
 void KMeans::updateCentroidsGPU() {
-    // Call CUDA kernel - all processing stays on GPU
+    // Call CUDA kernel with two-step reduction
     updateCentroidsKernel(
         d_points_soa, d_centroids, d_assignments, d_counts,
         static_cast<int>(numPoints), k, static_cast<int>(dimensions)
@@ -688,6 +688,7 @@ void KMeans::prepareGPUMemory() {
     }
     
     std::cout << "Using GPU implementation for k-means clustering with SoA layout" << std::endl;
+    std::cout << "Using Two-Step Reduction for centroid updates" << std::endl;
     if (useTriangleInequality) {
         std::cout << "Using Triangle Inequality optimization" << std::endl;
     }
@@ -878,4 +879,96 @@ bool KMeans::saveCentroidsToCSV(const std::string& filename, char delimiter) con
     file.close();
     std::cout << "Successfully saved centroids to " << filename << std::endl;
     return true;
+}
+
+// Public method to run appropriate warmup based on settings
+void KMeans::warmupKernels() {
+    if (!useGPU) {
+        // No warmup needed for CPU
+        return;
+    }
+    
+    std::cout << "Warming up GPU kernels..." << std::endl;
+    
+    // Save current state
+    std::vector<int> savedAssignments(numPoints);
+    cudaMemcpy(savedAssignments.data(), d_assignments, numPoints * sizeof(int), cudaMemcpyDeviceToHost);
+    
+    // Create temporary buffers for warmup to avoid modifying the actual data
+    int* temp_assignments = nullptr;
+    int* temp_changes = nullptr;
+    float* temp_centroids = nullptr;
+    
+    // Allocate temporary memory
+    cudaMalloc(&temp_assignments, numPoints * sizeof(int));
+    cudaMalloc(&temp_changes, sizeof(int));
+    cudaMalloc(&temp_centroids, dimensions * k * sizeof(float));
+    
+    // Copy current data to temps
+    cudaMemcpy(temp_assignments, d_assignments, numPoints * sizeof(int), cudaMemcpyDeviceToDevice);
+    cudaMemcpy(temp_centroids, d_centroids, dimensions * k * sizeof(float), cudaMemcpyDeviceToDevice);
+    
+    // Call the appropriate warmup functions with temporary buffers
+    // Warm up assign clusters kernel
+    assignClustersKernel(
+        d_points_soa, temp_centroids, temp_assignments, temp_changes,
+        static_cast<int>(numPoints), k, static_cast<int>(dimensions)
+    );
+    
+    // Warm up update centroids kernel with temporary buffers
+    int* temp_counts = nullptr;
+    cudaMalloc(&temp_counts, k * sizeof(int));
+    
+    updateCentroidsKernel(
+        d_points_soa, temp_centroids, temp_assignments, temp_counts,
+        static_cast<int>(numPoints), k, static_cast<int>(dimensions)
+    );
+    
+    // Additional warmup for triangle inequality if enabled
+    if (useTriangleInequality) {
+        float* temp_centroid_distances = nullptr;
+        float* temp_point_centroid_dists = nullptr;
+        
+        cudaMalloc(&temp_centroid_distances, k * k * sizeof(float));
+        cudaMalloc(&temp_point_centroid_dists, numPoints * k * sizeof(float));
+        
+        // Warm up centroid distances calculation
+        calculateCentroidDistancesKernel(
+            temp_centroids, temp_centroid_distances, k, static_cast<int>(dimensions)
+        );
+        
+        // Warm up triangle inequality assignment kernel
+        assignClustersWithTriangleInequalityKernel(
+            d_points_soa, temp_centroids, temp_centroid_distances, temp_point_centroid_dists,
+            temp_assignments, temp_changes, static_cast<int>(numPoints), k,
+            static_cast<int>(dimensions)
+        );
+        
+        // Free temporary memory
+        cudaFree(temp_centroid_distances);
+        cudaFree(temp_point_centroid_dists);
+    }
+    
+    // Synchronize device to ensure all warmup kernels have completed
+    cudaDeviceSynchronize();
+    
+    // Free temporary memory
+    cudaFree(temp_assignments);
+    cudaFree(temp_changes);
+    cudaFree(temp_centroids);
+    cudaFree(temp_counts);
+    
+    // Restore original assignments - important for correctness!
+    cudaMemcpy(d_assignments, savedAssignments.data(), numPoints * sizeof(int), cudaMemcpyHostToDevice);
+    
+    // Make sure all operations are complete
+    cudaDeviceSynchronize();
+    
+    // Check for any CUDA errors
+    cudaError_t error = cudaGetLastError();
+    if (error != cudaSuccess) {
+        std::cerr << "CUDA error during warmup: " << cudaGetErrorString(error) << std::endl;
+    }
+    
+    std::cout << "GPU warmup complete." << std::endl;
 }

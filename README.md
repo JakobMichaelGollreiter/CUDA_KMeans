@@ -1,4 +1,4 @@
-Changes made here: two stage reduction to reduce atomic operations. Also added gpu kernel warmup for more accurate timing. 
+Changes made here: fixed issue with triangle inequality.
 
 
 mkdir build

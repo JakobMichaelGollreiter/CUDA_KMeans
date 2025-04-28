@@ -24,13 +24,14 @@ void makeDirectory(const std::string& dir) {
 
 int main(int argc, char* argv[]) {
     // Check command line arguments
-    if (argc < 3 || argc > 6) {
-        std::cerr << "Usage: " << argv[0] << " <data_file.csv> <centroids_file.csv> <num_clusters> [max_iterations] [use_gpu]" << std::endl;
+    if (argc < 3 || argc > 7) {
+        std::cerr << "Usage: " << argv[0] << " <data_file.csv> <centroids_file.csv> <num_clusters> [max_iterations] [use_gpu] [use_triangle]" << std::endl;
         std::cerr << "  <data_file.csv>     : Path to CSV file containing data points" << std::endl;
         std::cerr << "  <centroids_file.csv>: Path to CSV file containing initial centroids" << std::endl;
         std::cerr << "  <num_clusters>      : Number of clusters (k)" << std::endl;
         std::cerr << "  [max_iterations]    : Maximum iterations (default: 100)" << std::endl;
         std::cerr << "  [use_gpu]           : Use GPU acceleration if available (0 or 1, default: 0)" << std::endl;
+        std::cerr << "  [use_triangle]      : Use Triangle Inequality optimization (0 or 1, default: 0)" << std::endl;
         return 1;
     }
     
@@ -76,6 +77,16 @@ int main(int argc, char* argv[]) {
             }
         }
         
+        // Optional argument for Triangle Inequality optimization
+        bool useTriangleInequality = false;  // Default value
+        if (argc >= 7) {
+            try {
+                useTriangleInequality = (std::stoi(argv[6]) != 0);
+            } catch (const std::exception& e) {
+                std::cerr << "Error: Invalid Triangle Inequality flag. Using default: No optimization" << std::endl;
+            }
+        }
+        
         // Check if CUDA is available if GPU requested
         if (useGPU && !KMeans::isCUDAAvailable()) {
             std::cerr << "Warning: CUDA is not available on this system. Falling back to CPU implementation." << std::endl;
@@ -83,7 +94,7 @@ int main(int argc, char* argv[]) {
         }
         
         // Create a KMeans instance
-        KMeans kmeans(numClusters, maxIterations, 1e-4, useGPU);
+        KMeans kmeans(numClusters, maxIterations, 1e-4, useGPU, useTriangleInequality);
         
         // Load data points from CSV file
         std::cout << "Loading data points from " << dataFile << "..." << std::endl;
@@ -102,6 +113,7 @@ int main(int argc, char* argv[]) {
         // Run the clustering algorithm
         std::cout << "\nRunning K-means clustering..." << std::endl;
         std::cout << (useGPU ? "Using GPU acceleration" : "Using CPU implementation") << std::endl;
+        std::cout << (useTriangleInequality ? "Using Triangle Inequality optimization" : "Using standard K-means") << std::endl;
 
         // Start timing
         auto start = std::chrono::high_resolution_clock::now();

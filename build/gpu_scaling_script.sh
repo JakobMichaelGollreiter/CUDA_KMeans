@@ -105,31 +105,34 @@ for dataset_file in $dataset_files; do
     
     if [ $run_status -ne 0 ]; then
         echo "Error: Command failed with status $run_status"
-        echo "Output:"
-        echo "$output"
+        echo "Output (first 300 chars):"
+        echo "$output" | head -c 300
         continue
     fi
     
-    # Extract elapsed time from output - look for "Algorithm time" instead of "Elapsed time"
-    elapsed_time=$(echo "$output" | grep "Algorithm time" | awk '{print $4}')
+    # Save output to a temporary file for debugging
+    echo "$output" > "temp_output_${filename}.txt"
     
-    # Extract iterations - look for iterations completed
-    iterations=$(echo "$output" | grep "Total loop count" | awk '{print $NF}')
-    
-    if [ -z "$elapsed_time" ]; then
-        # Fallback to old format if "Algorithm time" not found
-        elapsed_time=$(echo "$output" | grep "Elapsed time:" | awk '{print $3}')
-        
-        if [ -z "$elapsed_time" ]; then
-            echo "Warning: Could not extract elapsed time from output"
-            echo "Output:"
-            echo "$output"
-            continue
+    # Extract elapsed time - more robust pattern matching using grep and sed
+    time_line=$(echo "$output" | grep -i "Algorithm time")
+    if [ -n "$time_line" ]; then
+        elapsed_time=$(echo "$time_line" | sed -E 's/.*Algorithm time.*: ([0-9.]+).*/\1/')
+    else
+        time_line=$(echo "$output" | grep -i "Elapsed time")
+        if [ -n "$time_line" ]; then
+            elapsed_time=$(echo "$time_line" | sed -E 's/.*Elapsed time: ([0-9.]+).*/\1/')
+        else
+            echo "Warning: Could not find time information in output"
+            elapsed_time="N/A"
         fi
     fi
     
-    if [ -z "$iterations" ]; then
-        echo "Warning: Could not extract iterations from output, using maximum"
+    # Extract iterations
+    iters_line=$(echo "$output" | grep -i "Total iterations" || echo "$output" | grep -i "loop count")
+    if [ -n "$iters_line" ]; then
+        iterations=$(echo "$iters_line" | grep -o -E '[0-9]+' | tail -1)
+    else
+        echo "Warning: Could not extract iteration count, using maximum iterations"
         iterations="$MAX_ITERATIONS"
     fi
     
@@ -142,4 +145,4 @@ done
 echo "Done! Results saved to $OUTPUT_FILE"
 echo ""
 echo "Summary Report:"
-cat "$OUTPUT_FILE"
+cat "$OUTPUT_FILE"#

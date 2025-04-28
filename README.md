@@ -1,4 +1,4 @@
-Changes made here: fixed timing issues. 
+Changes made here: change from array of structures to structure of arrays. 
 
 
 mkdir build

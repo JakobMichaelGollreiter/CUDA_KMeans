@@ -106,8 +106,17 @@ public:
     // Load initial centroids from CSV file
     bool loadCentroidsFromCSV(const std::string& filename, char delimiter = ',');
     
-    // Run the k-means algorithm
+    // Original run method (calls all stages)
     void run();
+    
+    // NEW: Prepare GPU memory (allocate and transfer) - called before timing
+    void prepareGPUMemory();
+    
+    // NEW: Run just the algorithm (Lloyd's iterations) - this is timed
+    void runAlgorithm();
+    
+    // NEW: Retrieve results from GPU - called after timing
+    void retrieveResultsFromGPU();
     
     // Get cluster assignments
     std::vector<int> getClusterAssignments() const;

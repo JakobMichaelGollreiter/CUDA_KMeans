@@ -4,6 +4,7 @@
 #include <thrust/reduce.h>
 #include <thrust/execution_policy.h>
 #include <float.h>
+#include <math.h>
 
 // Constant memory for centroids (faster access)
 __constant__ float c_centroids[1024]; // Supports up to 1024/dimensions centroids
@@ -45,14 +46,17 @@ __global__ void assignPointsToClusters(
     
     for (int c = 0; c < numClusters; c++) {
         // Calculate the squared distance
-        float dist = 0.0f;
+        float dist_squared = 0.0f;
         for (int d = 0; d < dimensions; d++) {
             // SoA layout for both points and centroids
             // For point access: points_soa[d * numPoints + pointIdx]
             // For centroid access: s_centroids[d * numClusters + c]
             float diff = points_soa[d * numPoints + pointIdx] - s_centroids[d * numClusters + c];
-            dist += diff * diff;
+            dist_squared += diff * diff;
         }
+        
+        // Convert to regular Euclidean distance
+        float dist = sqrtf(dist_squared);
         
         if (dist < minDist) {
             minDist = dist;
@@ -87,15 +91,15 @@ __global__ void calculateCentroidDistances(
     }
     
     // Calculate squared distance between centroids
-    float dist = 0.0f;
+    float dist_squared = 0.0f;
     for (int d = 0; d < dimensions; d++) {
         // SoA layout for centroids: centroids[d * numClusters + c]
         float diff = centroids[d * numClusters + i] - centroids[d * numClusters + j];
-        dist += diff * diff;
+        dist_squared += diff * diff;
     }
     
-    // Store squared distance (no need for sqrt as we compare squared distances)
-    centroidDistances[i * numClusters + j] = dist;
+    // Convert to regular Euclidean distance
+    centroidDistances[i * numClusters + j] = sqrtf(dist_squared);
 }
 
 // CUDA kernel to assign points to nearest centroids using triangle inequality
@@ -148,12 +152,15 @@ __global__ void assignPointsToClustersWithTriangleInequality(
     
     // If the point is already assigned, calculate its distance to current centroid
     if (currentCluster >= 0) {
-        currentDist = 0.0f;
+        float dist_squared = 0.0f;
         for (int d = 0; d < dimensions; d++) {
             // SoA layout for both points and centroids
             float diff = points_soa[d * numPoints + pointIdx] - s_centroids[d * numClusters + currentCluster];
-            currentDist += diff * diff;
+            dist_squared += diff * diff;
         }
+        
+        // Convert to regular Euclidean distance
+        currentDist = sqrtf(dist_squared);
         
         // Store the distance
         pointCentroidDists[pointIdx * numClusters + currentCluster] = currentDist;
@@ -171,21 +178,23 @@ __global__ void assignPointsToClustersWithTriangleInequality(
         if (currentCluster >= 0) {
             float centroidDist = s_centroidDistances[c * numClusters + currentCluster];
             
-            // If d(centroid_c, centroid_current) >= 4 * d(point, centroid_current),
+            // If d(centroid_c, centroid_current) > 2 * d(point, centroid_current),
             // then centroid_c cannot be closer to the point than centroid_current
-            // Note: We use squared distances, so it's 4 * dist instead of 2 * sqrt(dist)
-            if (centroidDist >= 4.0f * currentDist) {
+            if (centroidDist > 2.0f * currentDist) {
                 continue;
             }
         }
         
         // Calculate distance to this centroid
-        float dist = 0.0f;
+        float dist_squared = 0.0f;
         for (int d = 0; d < dimensions; d++) {
             // SoA layout for both points and centroids
             float diff = points_soa[d * numPoints + pointIdx] - s_centroids[d * numClusters + c];
-            dist += diff * diff;
+            dist_squared += diff * diff;
         }
+        
+        // Convert to regular Euclidean distance
+        float dist = sqrtf(dist_squared);
         
         // Store the distance
         pointCentroidDists[pointIdx * numClusters + c] = dist;
@@ -222,7 +231,6 @@ __global__ void resetCentroidsAndCounts(
     }
 }
 
-// New version: Two-step reduction kernel for accumulating points
 // First step: Calculate local sums per block
 __global__ void accumulatePointsLocalSums(
     const float* points_soa,  // Points in SoA format

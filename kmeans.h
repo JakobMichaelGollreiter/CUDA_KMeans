@@ -13,6 +13,7 @@
 
 // Class for K-means clustering implementation using Lloyd's algorithm
 // Optimized to keep data on GPU throughout the entire algorithm
+// Using Structure of Arrays (SoA) layout for better memory coalescing
 class KMeans {
 private:
     int k;              // Number of clusters
@@ -21,7 +22,7 @@ private:
     bool useGPU;        // Flag to indicate if GPU should be used
     bool useTriangleInequality; // Flag to use triangle inequality optimization
 
-    // Helper struct for a point in N-dimensional space
+    // Helper struct for a point in N-dimensional space (for CPU implementation)
     struct Point {
         std::vector<double> features;
         int cluster;
@@ -35,8 +36,8 @@ private:
     std::vector<std::vector<double>> centroidDistances; // Distances between centroids
     
     // GPU specific members
-    float* d_points;       // Device memory for points
-    float* d_centroids;    // Device memory for centroids
+    float* d_points_soa;   // Device memory for points in SoA format
+    float* d_centroids;    // Device memory for centroids in SoA format
     float* d_centroidDistances; // Device memory for centroid distances
     int* d_assignments;    // Device memory for cluster assignments
     int* d_changes;        // Device memory for tracking changes
@@ -89,6 +90,10 @@ private:
     
     // Copy results from GPU (called once at the end)
     void copyFinalResultsFromGPU();
+    
+    // Debug methods
+    void verifyDataTransfer();
+    void verifyAssignments(int iteration);
 
 public:
     KMeans(int numClusters, int maxIter = 100, double eps = 1e-4, bool gpu = false, bool useTriangle = false);

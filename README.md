@@ -1,4 +1,4 @@
-Changes made here: keep all the data on gpu, do not transfer to cpu between iterations, triangle inequality
+Changes made here: fixed timing issues. 
 
 
 mkdir build

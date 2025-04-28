@@ -110,7 +110,13 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         
-        // Run the clustering algorithm
+        // Separate data loading and GPU memory preparation from algorithm timing
+        if (useGPU) {
+            std::cout << "\nPreparing GPU memory (not included in timing)..." << std::endl;
+            kmeans.prepareGPUMemory();
+        }
+        
+        // Run the clustering algorithm with timing only the algorithm, not data transfers
         std::cout << "\nRunning K-means clustering..." << std::endl;
         std::cout << (useGPU ? "Using GPU acceleration" : "Using CPU implementation") << std::endl;
         std::cout << (useTriangleInequality ? "Using Triangle Inequality optimization" : "Using standard K-means") << std::endl;
@@ -118,15 +124,21 @@ int main(int argc, char* argv[]) {
         // Start timing
         auto start = std::chrono::high_resolution_clock::now();
 
-        // Run the algorithm
-        kmeans.run();
+        // Run only the algorithm (Lloyd's iterations)
+        kmeans.runAlgorithm();
 
         // End timing
         auto end = std::chrono::high_resolution_clock::now();
 
-        // Calculate the duration
+        // If using GPU, copy results back (not included in timing)
+        if (useGPU) {
+            std::cout << "Copying results from GPU (not included in timing)..." << std::endl;
+            kmeans.retrieveResultsFromGPU();
+        }
+
+        // Calculate and display the algorithm duration only
         std::chrono::duration<double> elapsed = end - start;
-        std::cout << "\nElapsed time: " << elapsed.count() << " seconds" << std::endl;
+        std::cout << "\nAlgorithm time (excluding transfers): " << elapsed.count() << " seconds" << std::endl;
         std::cout << "Clustering completed." << std::endl;
         std::cout << "------------------------" << std::endl;
 
@@ -160,8 +172,8 @@ int main(int argc, char* argv[]) {
         makeDirectory(centroidsOutputDir);
 
         // Construct file paths
-        std::string outputClustersFile =  clusteOutputDir + "/" + filename + "_labels.csv";
-        std::string outputCentroidsFile =  centroidsOutputDir + "/" + filename + "_centers.csv";
+        std::string outputClustersFile = clusteOutputDir + "/" + filename + "_labels.csv";
+        std::string outputCentroidsFile = centroidsOutputDir + "/" + filename + "_centers.csv";
 
         kmeans.saveClusterAssignmentsToCSV(outputClustersFile);
         kmeans.saveCentroidsToCSV(outputCentroidsFile);

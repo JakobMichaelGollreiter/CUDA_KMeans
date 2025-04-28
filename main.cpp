@@ -122,18 +122,6 @@ int main(int argc, char* argv[]) {
         auto assignments = kmeans.getClusterAssignments();
         auto centroids = kmeans.getCentroids();
         
-        // // Print each cluster's centroid
-        // std::cout << "\nFinal cluster centroids:" << std::endl;
-        // std::cout << "-----------------------" << std::endl;
-        // for (size_t i = 0; i < centroids.size(); i++) {
-        //     std::cout << "Centroid " << i << ": (";
-        //     for (size_t j = 0; j < centroids[i].size(); j++) {
-        //         std::cout << centroids[i][j];
-        //         if (j < centroids[i].size() - 1) std::cout << ", ";
-        //     }
-        //     std::cout << ")" << std::endl;
-        // }
-        
         // Count points in each cluster
         std::vector<int> clusterCounts(numClusters, 0);
         for (int cluster : assignments) {

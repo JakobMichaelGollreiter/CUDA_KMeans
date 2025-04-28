@@ -6,6 +6,7 @@
 
 // Constant memory for centroids (faster access)
 __constant__ float c_centroids[1024]; // Supports up to 1024/dimensions centroids
+__constant__ float c_centroidDistances[1024]; // Supports up to 32x32 centroids
 
 // CUDA kernel to assign points to nearest centroids
 __global__ void assignPointsToClusters(
@@ -63,6 +64,144 @@ __global__ void assignPointsToClusters(
     // Check if the assignment changed
     int oldCluster = assignments[pointIdx];
     if (oldCluster != bestCluster) {
+        assignments[pointIdx] = bestCluster;
+        atomicAdd(changes, 1);
+    }
+}
+
+// CUDA kernel to calculate distances between centroids
+__global__ void calculateCentroidDistances(
+    const float* centroids,
+    float* centroidDistances,
+    int numClusters,
+    int dimensions
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int j = blockIdx.y * blockDim.y + threadIdx.y;
+    
+    if (i >= numClusters || j >= numClusters) return;
+    
+    // Skip diagonal (distance to self is 0)
+    if (i == j) {
+        centroidDistances[i * numClusters + j] = 0.0f;
+        return;
+    }
+    
+    // Calculate squared distance between centroids
+    float dist = 0.0f;
+    for (int d = 0; d < dimensions; d++) {
+        float diff = centroids[i * dimensions + d] - centroids[j * dimensions + d];
+        dist += diff * diff;
+    }
+    
+    // Store squared distance (no need for sqrt as we compare squared distances)
+    centroidDistances[i * numClusters + j] = dist;
+}
+
+// CUDA kernel to assign points to nearest centroids using triangle inequality
+__global__ void assignPointsToClustersWithTriangleInequality(
+    const float* points,
+    const float* centroids,
+    const float* centroidDistances,
+    float* pointCentroidDists,  // Store distances between points and centroids
+    int* assignments,
+    int* changes,
+    int numPoints,
+    int numClusters,
+    int dimensions
+) {
+    int pointIdx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (pointIdx >= numPoints) return;
+    
+    // Get the point
+    const float* point = &points[pointIdx * dimensions];
+    
+    // Get current assignment and distance
+    int currentCluster = assignments[pointIdx];
+    float currentDist = FLT_MAX;
+    
+    // Use shared memory to cache centroids
+    extern __shared__ float s_data[];
+    float* s_centroids = s_data;
+    float* s_centroidDistances = &s_data[numClusters * dimensions];
+    
+    // Collaboratively load centroids into shared memory
+    for (int c = threadIdx.x; c < numClusters * dimensions; c += blockDim.x) {
+        if (c < numClusters * dimensions) {
+            if (numClusters * dimensions <= 1024) {
+                s_centroids[c] = c_centroids[c];
+            } else {
+                s_centroids[c] = centroids[c];
+            }
+        }
+    }
+    
+    // Collaboratively load centroid distances into shared memory
+    for (int c = threadIdx.x; c < numClusters * numClusters; c += blockDim.x) {
+        if (c < numClusters * numClusters) {
+            if (numClusters * numClusters <= 1024) {
+                s_centroidDistances[c] = c_centroidDistances[c];
+            } else {
+                s_centroidDistances[c] = centroidDistances[c];
+            }
+        }
+    }
+    
+    __syncthreads();
+    
+    // If the point is already assigned, calculate its distance to current centroid
+    if (currentCluster >= 0) {
+        const float* currentCentroid = &s_centroids[currentCluster * dimensions];
+        currentDist = 0.0f;
+        for (int d = 0; d < dimensions; d++) {
+            float diff = point[d] - currentCentroid[d];
+            currentDist += diff * diff;
+        }
+        
+        // Store the distance
+        pointCentroidDists[pointIdx * numClusters + currentCluster] = currentDist;
+    }
+    
+    float minDist = currentDist;
+    int bestCluster = currentCluster;
+    
+    // Check all other centroids
+    for (int c = 0; c < numClusters; c++) {
+        // Skip current cluster
+        if (c == currentCluster) continue;
+        
+        // If we already have an assignment, use triangle inequality to avoid unnecessary calculations
+        if (currentCluster >= 0) {
+            float centroidDist = s_centroidDistances[c * numClusters + currentCluster];
+            
+            // If d(centroid_c, centroid_current) >= 4 * d(point, centroid_current),
+            // then centroid_c cannot be closer to the point than centroid_current
+            // Note: We use squared distances, so it's 4 * dist instead of 2 * sqrt(dist)
+            if (centroidDist >= 4.0f * currentDist) {
+                continue;
+            }
+        }
+        
+        // Calculate distance to this centroid
+        const float* centroid = &s_centroids[c * dimensions];
+        float dist = 0.0f;
+        for (int d = 0; d < dimensions; d++) {
+            float diff = point[d] - centroid[d];
+            dist += diff * diff;
+        }
+        
+        // Store the distance
+        pointCentroidDists[pointIdx * numClusters + c] = dist;
+        
+        // Update if closer
+        if (dist < minDist) {
+            minDist = dist;
+            bestCluster = c;
+        }
+    }
+    
+    // Check if the assignment changed
+    if (currentCluster != bestCluster) {
         assignments[pointIdx] = bestCluster;
         atomicAdd(changes, 1);
     }
@@ -132,6 +271,65 @@ __global__ void finalizeCentroids(
     if (numClusters * dimensions <= 1024) {
         // We can't directly write to constant memory, so this will be done by the host
     }
+}
+
+// Host function to calculate centroid distances
+extern "C" void calculateCentroidDistancesKernel(
+    float* d_centroids,
+    float* d_centroidDistances,
+    int numClusters,
+    int dimensions
+) {
+    dim3 blockSize(16, 16);
+    dim3 gridSize((numClusters + blockSize.x - 1) / blockSize.x, 
+                  (numClusters + blockSize.y - 1) / blockSize.y);
+    
+    calculateCentroidDistances<<<gridSize, blockSize>>>(
+        d_centroids, d_centroidDistances, numClusters, dimensions
+    );
+    
+    // Copy to constant memory if it fits
+    if (numClusters * numClusters <= 1024) {
+        cudaMemcpyToSymbol(c_centroidDistances, d_centroidDistances, 
+                           numClusters * numClusters * sizeof(float));
+    }
+}
+
+// Host function to assign clusters using triangle inequality
+extern "C" int assignClustersWithTriangleInequalityKernel(
+    float* d_points,
+    float* d_centroids,
+    float* d_centroidDistances,
+    float* d_pointCentroidDists,
+    int* d_assignments,
+    int* d_changes,
+    int numPoints,
+    int numClusters,
+    int dimensions
+) {
+    // Reset the changes counter
+    cudaMemset(d_changes, 0, sizeof(int));
+    
+    // Copy the current centroids to constant memory if they fit
+    if (numClusters * dimensions <= 1024) {
+        cudaMemcpyToSymbol(c_centroids, d_centroids, numClusters * dimensions * sizeof(float));
+    }
+    
+    // Launch the kernel with shared memory for centroids and centroid distances
+    int threadsPerBlock = 256;
+    int blocksPerGrid = (numPoints + threadsPerBlock - 1) / threadsPerBlock;
+    int sharedMemSize = (numClusters * dimensions + numClusters * numClusters) * sizeof(float);
+    
+    assignPointsToClustersWithTriangleInequality<<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(
+        d_points, d_centroids, d_centroidDistances, d_pointCentroidDists,
+        d_assignments, d_changes, numPoints, numClusters, dimensions
+    );
+    
+    // Copy the result back (only the change count, not all assignments)
+    int changes;
+    cudaMemcpy(&changes, d_changes, sizeof(int), cudaMemcpyDeviceToHost);
+    
+    return changes;
 }
 
 // Host function to assign clusters

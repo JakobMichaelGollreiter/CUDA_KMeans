@@ -19,6 +19,18 @@ extern "C" int assignClustersKernel(
     int dimensions
 );
 
+extern "C" int assignClustersWithTriangleInequalityKernel(
+    float* d_points,
+    float* d_centroids,
+    float* d_centroidDistances,
+    float* d_pointCentroidDists,
+    int* d_assignments,
+    int* d_changes,
+    int numPoints,
+    int numClusters,
+    int dimensions
+);
+
 extern "C" void updateCentroidsKernel(
     float* d_points,
     float* d_centroids,
@@ -29,13 +41,20 @@ extern "C" void updateCentroidsKernel(
     int dimensions
 );
 
+extern "C" void calculateCentroidDistancesKernel(
+    float* d_centroids, 
+    float* d_centroidDistances,
+    int numClusters, 
+    int dimensions
+);
+
 extern "C" bool isCUDAAvailable();
 
 // Constructor with parameters
-KMeans::KMeans(int numClusters, int maxIter, double eps, bool gpu) 
-    : k(numClusters), maxIterations(maxIter), epsilon(eps), useGPU(gpu),
-      d_points(nullptr), d_centroids(nullptr), d_assignments(nullptr), 
-      d_changes(nullptr), d_counts(nullptr), dimensions(0), numPoints(0) {
+KMeans::KMeans(int numClusters, int maxIter, double eps, bool gpu, bool useTriangle) 
+    : k(numClusters), maxIterations(maxIter), epsilon(eps), useGPU(gpu), useTriangleInequality(useTriangle),
+      d_points(nullptr), d_centroids(nullptr), d_centroidDistances(nullptr), d_assignments(nullptr), 
+      d_changes(nullptr), d_counts(nullptr), d_pointCentroidDists(nullptr), dimensions(0), numPoints(0) {
     
     // Check if GPU usage is requested but not available
     if (useGPU && !isCUDAAvailable()) {
@@ -61,6 +80,29 @@ double KMeans::distance(const std::vector<double>& a, const std::vector<double>&
     return std::sqrt(sum);
 }
 
+// Calculate distances between all centroids
+void KMeans::calculateCentroidDistances() {
+    centroidDistances.resize(k, std::vector<double>(k, 0.0));
+    
+    for (int i = 0; i < k; i++) {
+        for (int j = i + 1; j < k; j++) {
+            double dist = distance(centroids[i], centroids[j]);
+            centroidDistances[i][j] = dist;
+            centroidDistances[j][i] = dist; // Symmetric
+        }
+    }
+}
+
+// Calculate centroid distances on GPU
+void KMeans::calculateCentroidDistancesGPU() {
+    calculateCentroidDistancesKernel(
+        d_centroids, 
+        d_centroidDistances, 
+        k, 
+        static_cast<int>(dimensions)
+    );
+}
+
 // Add a data point to the dataset
 void KMeans::addPoint(const std::vector<double>& features) {
     points.emplace_back(features);
@@ -75,6 +117,11 @@ void KMeans::setCentroids(const std::vector<std::vector<double>>& initialCentroi
     }
     
     centroids = initialCentroids;
+    
+    // If using triangle inequality, calculate centroid distances
+    if (useTriangleInequality && !centroids.empty()) {
+        calculateCentroidDistances();
+    }
 }
 
 // Enable or disable GPU usage
@@ -87,13 +134,19 @@ void KMeans::setUseGPU(bool use) {
     }
 }
 
+// Enable or disable triangle inequality
+void KMeans::setUseTriangleInequality(bool use) {
+    useTriangleInequality = use;
+}
+
 // Check if CUDA is available
 bool KMeans::isCUDAAvailable() {
     return ::isCUDAAvailable();
 }
 
-// Load data points from CSV file
+// Load data points from CSV file (existing code)
 bool KMeans::loadDataFromCSV(const std::string& filename, char delimiter) {
+    // Existing implementation
     std::ifstream file(filename);
     if (!file.is_open()) {
         std::cerr << "Error: Could not open file " << filename << std::endl;
@@ -142,8 +195,9 @@ bool KMeans::loadDataFromCSV(const std::string& filename, char delimiter) {
     return true;
 }
 
-// Load initial centroids from CSV file
+// Load initial centroids from CSV file (existing code)
 bool KMeans::loadCentroidsFromCSV(const std::string& filename, char delimiter) {
+    // Existing implementation
     std::ifstream file(filename);
     if (!file.is_open()) {
         std::cerr << "Error: Could not open file " << filename << std::endl;
@@ -218,6 +272,12 @@ void KMeans::allocateGPUMemory() {
     // Allocate memory for centroids
     cudaMalloc(&d_centroids, k * dimensions * sizeof(float));
     
+    // Allocate memory for centroid distances (if using triangle inequality)
+    if (useTriangleInequality) {
+        cudaMalloc(&d_centroidDistances, k * k * sizeof(float));
+        cudaMalloc(&d_pointCentroidDists, numPoints * k * sizeof(float));
+    }
+    
     // Allocate memory for assignments
     cudaMalloc(&d_assignments, numPoints * sizeof(int));
     
@@ -235,15 +295,19 @@ void KMeans::allocateGPUMemory() {
 void KMeans::freeGPUMemory() {
     if (d_points) cudaFree(d_points);
     if (d_centroids) cudaFree(d_centroids);
+    if (d_centroidDistances) cudaFree(d_centroidDistances);
     if (d_assignments) cudaFree(d_assignments);
     if (d_changes) cudaFree(d_changes);
     if (d_counts) cudaFree(d_counts);
+    if (d_pointCentroidDists) cudaFree(d_pointCentroidDists);
     
     d_points = nullptr;
     d_centroids = nullptr;
+    d_centroidDistances = nullptr;
     d_assignments = nullptr;
     d_changes = nullptr;
     d_counts = nullptr;
+    d_pointCentroidDists = nullptr;
 }
 
 // Copy initial data to GPU - called once at the beginning
@@ -267,6 +331,21 @@ void KMeans::copyInitialDataToGPU() {
         }
     }
     cudaMemcpy(d_centroids, h_centroids_flat.data(), k * dimensions * sizeof(float), cudaMemcpyHostToDevice);
+    
+    // If using triangle inequality, copy centroid distances
+    if (useTriangleInequality) {
+        // Calculate centroid distances
+        calculateCentroidDistances();
+        
+        // Copy to device
+        std::vector<float> h_centroid_distances_flat(k * k);
+        for (int i = 0; i < k; i++) {
+            for (int j = 0; j < k; j++) {
+                h_centroid_distances_flat[i * k + j] = static_cast<float>(centroidDistances[i][j]);
+            }
+        }
+        cudaMemcpy(d_centroidDistances, h_centroid_distances_flat.data(), k * k * sizeof(float), cudaMemcpyHostToDevice);
+    }
 }
 
 // Copy final results from GPU - called once at the end
@@ -290,6 +369,9 @@ void KMeans::copyFinalResultsFromGPU() {
             centroids[i][j] = static_cast<double>(h_centroids_flat[i * dimensions + j]);
         }
     }
+    
+    // If using triangle inequality, we could also copy back the point-to-centroid distances
+    // but it's not necessary for the final result
 }
 
 // Assign clusters - CPU version
@@ -327,6 +409,75 @@ int KMeans::assignClustersCPU() {
             point.cluster = closestCluster;
             changes++;
         }
+        
+        // Store distance to assigned centroid for triangle inequality optimization
+        point.distToAssignedCentroid = minDist;
+    }
+    
+    return changes;
+}
+
+// Assign clusters - CPU version with triangle inequality
+int KMeans::assignClustersCPUWithTriangleInequality() {
+    int changes = 0;
+    
+    // First, update distances between centroids
+    calculateCentroidDistances();
+    
+    for (auto& point : points) {
+        double minDist = std::numeric_limits<double>::max();
+        int closestCluster = -1;
+        int currentCluster = point.cluster;
+        
+        // If point is already assigned to a cluster, calculate distance to current centroid
+        if (currentCluster >= 0) {
+            double currentDist = distance(point.features, centroids[currentCluster]);
+            point.distToAssignedCentroid = currentDist;
+            minDist = currentDist;
+            closestCluster = currentCluster;
+        }
+        
+        for (int i = 0; i < k; i++) {
+            // Skip the current cluster as we already calculated its distance
+            if (i == currentCluster) {
+                continue;
+            }
+            
+            // Use triangle inequality to avoid unnecessary distance calculations
+            // If d(centroid_i, centroid_current) > 2 * d(point, centroid_current),
+            // then centroid_i cannot be closer to the point than centroid_current
+            if (currentCluster >= 0 && 
+                centroidDistances[i][currentCluster] >= 2.0 * point.distToAssignedCentroid) {
+                continue;
+            }
+            
+            // Check for dimension mismatch
+            if (point.features.size() != centroids[i].size()) {
+                std::cerr << "Error: Dimension mismatch between point (" 
+                          << point.features.size() << ") and centroid " 
+                          << i << " (" << centroids[i].size() << ")" << std::endl;
+                continue;
+            }
+            
+            double dist = distance(point.features, centroids[i]);
+            if (dist < minDist) {
+                minDist = dist;
+                closestCluster = i;
+            }
+        }
+        
+        // Verify we found a valid cluster
+        if (closestCluster == -1) {
+            std::cerr << "Error: Could not assign point to any cluster" << std::endl;
+            continue;
+        }
+        
+        // Check if cluster assignment changed
+        if (point.cluster != closestCluster) {
+            point.cluster = closestCluster;
+            point.distToAssignedCentroid = minDist;
+            changes++;
+        }
     }
     
     return changes;
@@ -341,12 +492,33 @@ int KMeans::assignClustersGPU() {
     );
 }
 
+// Assign clusters - GPU version with triangle inequality
+int KMeans::assignClustersGPUWithTriangleInequality() {
+    // Update centroid distances
+    calculateCentroidDistancesGPU();
+    
+    // Call CUDA kernel with triangle inequality optimization
+    return assignClustersWithTriangleInequalityKernel(
+        d_points, d_centroids, d_centroidDistances, d_pointCentroidDists, 
+        d_assignments, d_changes, static_cast<int>(numPoints), k, 
+        static_cast<int>(dimensions)
+    );
+}
+
 // Assign clusters - dispatcher
 int KMeans::assignClusters() {
     if (useGPU) {
-        return assignClustersGPU();
+        if (useTriangleInequality) {
+            return assignClustersGPUWithTriangleInequality();
+        } else {
+            return assignClustersGPU();
+        }
     } else {
-        return assignClustersCPU();
+        if (useTriangleInequality) {
+            return assignClustersCPUWithTriangleInequality();
+        } else {
+            return assignClustersCPU();
+        }
     }
 }
 
@@ -388,6 +560,11 @@ void KMeans::updateCentroidsCPU() {
         // Update centroid
         centroids[i] = newCentroids[i];
     }
+    
+    // If using triangle inequality, update centroid distances
+    if (useTriangleInequality) {
+        calculateCentroidDistances();
+    }
 }
 
 // Update centroids - GPU version
@@ -397,6 +574,11 @@ void KMeans::updateCentroidsGPU() {
         d_points, d_centroids, d_assignments, d_counts,
         static_cast<int>(numPoints), k, static_cast<int>(dimensions)
     );
+    
+    // If using triangle inequality, update centroid distances
+    if (useTriangleInequality) {
+        calculateCentroidDistancesGPU();
+    }
 }
 
 // Update centroids - dispatcher
@@ -439,10 +621,16 @@ void KMeans::run() {
     // If using GPU, allocate memory and copy data once at the beginning
     if (useGPU) {
         std::cout << "Using GPU implementation for k-means clustering" << std::endl;
+        if (useTriangleInequality) {
+            std::cout << "Using Triangle Inequality optimization" << std::endl;
+        }
         allocateGPUMemory();
         copyInitialDataToGPU(); // Copy data to GPU only once
     } else {
         std::cout << "Using CPU implementation for k-means clustering" << std::endl;
+        if (useTriangleInequality) {
+            std::cout << "Using Triangle Inequality optimization" << std::endl;
+        }
     }
     
     // Main Lloyd's algorithm loop
@@ -471,6 +659,7 @@ void KMeans::run() {
     std::cout << "K-means converged after " << iterations << " iterations." << std::endl;
 }
 
+// Rest of the code remains the same
 // Get cluster assignments
 std::vector<int> KMeans::getClusterAssignments() const {
     std::vector<int> assignments;
@@ -500,7 +689,7 @@ double KMeans::calculateSSE() const {
     return sse;
 }
 
-// Save cluster assignments to CSV file (only cluster column)
+// Save cluster assignments to CSV file
 bool KMeans::saveClusterAssignmentsToCSV(const std::string& filename, char delimiter) const {
     std::ofstream file(filename);
     if (!file.is_open()) {

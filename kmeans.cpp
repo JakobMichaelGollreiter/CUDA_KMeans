@@ -144,9 +144,8 @@ bool KMeans::isCUDAAvailable() {
     return ::isCUDAAvailable();
 }
 
-// Load data points from CSV file (existing code)
+// Load data points from CSV file
 bool KMeans::loadDataFromCSV(const std::string& filename, char delimiter) {
-    // Existing implementation
     std::ifstream file(filename);
     if (!file.is_open()) {
         std::cerr << "Error: Could not open file " << filename << std::endl;
@@ -195,9 +194,8 @@ bool KMeans::loadDataFromCSV(const std::string& filename, char delimiter) {
     return true;
 }
 
-// Load initial centroids from CSV file (existing code)
+// Load initial centroids from CSV file
 bool KMeans::loadCentroidsFromCSV(const std::string& filename, char delimiter) {
-    // Existing implementation
     std::ifstream file(filename);
     if (!file.is_open()) {
         std::cerr << "Error: Could not open file " << filename << std::endl;
@@ -369,9 +367,6 @@ void KMeans::copyFinalResultsFromGPU() {
             centroids[i][j] = static_cast<double>(h_centroids_flat[i * dimensions + j]);
         }
     }
-    
-    // If using triangle inequality, we could also copy back the point-to-centroid distances
-    // but it's not necessary for the final result
 }
 
 // Assign clusters - CPU version
@@ -590,8 +585,10 @@ void KMeans::updateCentroids() {
     }
 }
 
-// Run the k-means algorithm
-void KMeans::run() {
+// Prepare GPU memory (allocate and transfer) - NEW METHOD
+void KMeans::prepareGPUMemory() {
+    if (!useGPU) return;
+    
     if (points.empty()) {
         std::cerr << "Error: No data points loaded" << std::endl;
         return;
@@ -618,19 +615,34 @@ void KMeans::run() {
         }
     }
     
-    // If using GPU, allocate memory and copy data once at the beginning
-    if (useGPU) {
-        std::cout << "Using GPU implementation for k-means clustering" << std::endl;
-        if (useTriangleInequality) {
-            std::cout << "Using Triangle Inequality optimization" << std::endl;
-        }
-        allocateGPUMemory();
-        copyInitialDataToGPU(); // Copy data to GPU only once
-    } else {
-        std::cout << "Using CPU implementation for k-means clustering" << std::endl;
-        if (useTriangleInequality) {
-            std::cout << "Using Triangle Inequality optimization" << std::endl;
-        }
+    std::cout << "Using GPU implementation for k-means clustering" << std::endl;
+    if (useTriangleInequality) {
+        std::cout << "Using Triangle Inequality optimization" << std::endl;
+    }
+    
+    // Allocate GPU memory
+    allocateGPUMemory();
+    
+    // Copy data to GPU
+    copyInitialDataToGPU();
+}
+
+// Run just the algorithm iterations - NEW METHOD
+void KMeans::runAlgorithm() {
+    if (points.empty()) {
+        std::cerr << "Error: No data points loaded" << std::endl;
+        return;
+    }
+    
+    if (points.size() < static_cast<size_t>(k)) {
+        std::cerr << "Error: Number of points (" << points.size() 
+                  << ") must be at least equal to k (" << k << ")" << std::endl;
+        return;
+    }
+    
+    if (centroids.empty()) {
+        std::cerr << "Error: Centroids not initialized. Please load centroids before running." << std::endl;
+        return;
     }
     
     // Main Lloyd's algorithm loop
@@ -638,10 +650,10 @@ void KMeans::run() {
     int changes;
     
     do {
-        // Assign points to nearest centroids - all on GPU if useGPU is true
+        // Assign points to nearest centroids
         changes = assignClusters();
         
-        // Update centroids based on assigned points - all on GPU if useGPU is true
+        // Update centroids based on assigned points
         updateCentroids();
         
         iterations++;
@@ -650,16 +662,41 @@ void KMeans::run() {
         
     } while (changes > 0 && iterations < maxIterations);
     
-    // If using GPU, copy results back once at the end
-    if (useGPU) {
-        copyFinalResultsFromGPU(); // Copy results back to host once at the end
-        freeGPUMemory();  
-    }
-    
     std::cout << "K-means converged after " << iterations << " iterations." << std::endl;
 }
 
-// Rest of the code remains the same
+// Retrieve results from GPU - NEW METHOD
+void KMeans::retrieveResultsFromGPU() {
+    if (!useGPU) return;
+    
+    // Copy results back from GPU
+    copyFinalResultsFromGPU();
+    
+    // Free GPU memory
+    freeGPUMemory();
+}
+
+// Run the k-means algorithm - ORIGINAL METHOD (now calls the separate stages)
+void KMeans::run() {
+    // If using GPU, prepare memory
+    if (useGPU) {
+        prepareGPUMemory();
+    } else {
+        std::cout << "Using CPU implementation for k-means clustering" << std::endl;
+        if (useTriangleInequality) {
+            std::cout << "Using Triangle Inequality optimization" << std::endl;
+        }
+    }
+    
+    // Run the algorithm
+    runAlgorithm();
+    
+    // If using GPU, retrieve results
+    if (useGPU) {
+        retrieveResultsFromGPU();
+    }
+}
+
 // Get cluster assignments
 std::vector<int> KMeans::getClusterAssignments() const {
     std::vector<int> assignments;

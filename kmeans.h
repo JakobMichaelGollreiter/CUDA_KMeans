@@ -19,35 +19,52 @@ private:
     int maxIterations;  // Maximum iterations before stopping
     double epsilon;     // Convergence threshold
     bool useGPU;        // Flag to indicate if GPU should be used
+    bool useTriangleInequality; // Flag to use triangle inequality optimization
 
     // Helper struct for a point in N-dimensional space
     struct Point {
         std::vector<double> features;
         int cluster;
+        double distToAssignedCentroid; // Distance to currently assigned centroid
 
-        Point(const std::vector<double>& f) : features(f), cluster(-1) {}
+        Point(const std::vector<double>& f) : features(f), cluster(-1), distToAssignedCentroid(std::numeric_limits<double>::max()) {}
     };
 
     std::vector<Point> points;             // All data points (host)
     std::vector<std::vector<double>> centroids;  // Cluster centroids (host)
+    std::vector<std::vector<double>> centroidDistances; // Distances between centroids
     
     // GPU specific members
     float* d_points;       // Device memory for points
     float* d_centroids;    // Device memory for centroids
+    float* d_centroidDistances; // Device memory for centroid distances
     int* d_assignments;    // Device memory for cluster assignments
     int* d_changes;        // Device memory for tracking changes
     int* d_counts;         // Device memory for counts in each cluster
+    float* d_pointCentroidDists; // Device memory for point-to-centroid distances
     size_t dimensions;     // Number of dimensions for points
     size_t numPoints;      // Number of points
 
     // Calculate Euclidean distance between two points (CPU version)
     double distance(const std::vector<double>& a, const std::vector<double>& b) const;
 
+    // Calculate distances between all centroids
+    void calculateCentroidDistances();
+
+    // Update centroid distances on GPU
+    void calculateCentroidDistancesGPU();
+
     // Assign each point to nearest centroid - CPU version
     int assignClustersCPU();
     
+    // Assign each point to nearest centroid - CPU version with triangle inequality
+    int assignClustersCPUWithTriangleInequality();
+    
     // Assign each point to nearest centroid - GPU version
     int assignClustersGPU();
+    
+    // Assign each point to nearest centroid - GPU version with triangle inequality
+    int assignClustersGPUWithTriangleInequality();
     
     // Combined function that calls either CPU or GPU version
     int assignClusters();
@@ -74,7 +91,7 @@ private:
     void copyFinalResultsFromGPU();
 
 public:
-    KMeans(int numClusters, int maxIter = 100, double eps = 1e-4, bool gpu = false);
+    KMeans(int numClusters, int maxIter = 100, double eps = 1e-4, bool gpu = false, bool useTriangle = false);
     ~KMeans();
     
     // Add a data point to the dataset
@@ -109,6 +126,9 @@ public:
     
     // Enable or disable GPU usage
     void setUseGPU(bool use);
+    
+    // Enable or disable triangle inequality optimization
+    void setUseTriangleInequality(bool use);
     
     // Check if CUDA is available
     static bool isCUDAAvailable();

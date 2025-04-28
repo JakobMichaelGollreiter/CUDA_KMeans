@@ -114,6 +114,9 @@ int main(int argc, char* argv[]) {
         if (useGPU) {
             std::cout << "\nPreparing GPU memory (not included in timing)..." << std::endl;
             kmeans.prepareGPUMemory();
+            
+            // NEW: Warm up GPU kernels before timing
+            kmeans.warmupKernels();
         }
         
         // Run the clustering algorithm with timing only the algorithm, not data transfers

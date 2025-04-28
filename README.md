@@ -1,3 +1,7 @@
+Changes made here: keep all the data on gpu, do not transfer to cpu between iterations. 
+
+
+
 mkdir build
 cd build
 cmake ..

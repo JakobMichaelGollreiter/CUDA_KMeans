@@ -94,6 +94,12 @@ private:
     // Debug methods
     void verifyDataTransfer();
     void verifyAssignments(int iteration);
+    
+    // Warmup functions for GPU kernels
+    void warmupGPUKernels();
+    void warmupAssignClustersKernel();
+    void warmupUpdateCentroidsKernel();
+    void warmupTriangleInequalityKernels();
 
 public:
     KMeans(int numClusters, int maxIter = 100, double eps = 1e-4, bool gpu = false, bool useTriangle = false);
@@ -146,6 +152,9 @@ public:
     
     // Check if CUDA is available
     static bool isCUDAAvailable();
+    
+    // Public method to run warmup before timing
+    void warmupKernels();
 };
 
 #endif // KMEANS_H

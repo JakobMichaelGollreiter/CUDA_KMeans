@@ -12,6 +12,7 @@
 #include <cuda_runtime.h>
 
 // Class for K-means clustering implementation using Lloyd's algorithm
+// Optimized to keep data on GPU throughout the entire algorithm
 class KMeans {
 private:
     int k;              // Number of clusters
@@ -27,8 +28,8 @@ private:
         Point(const std::vector<double>& f) : features(f), cluster(-1) {}
     };
 
-    std::vector<Point> points;             // All data points
-    std::vector<std::vector<double>> centroids;  // Cluster centroids
+    std::vector<Point> points;             // All data points (host)
+    std::vector<std::vector<double>> centroids;  // Cluster centroids (host)
     
     // GPU specific members
     float* d_points;       // Device memory for points
@@ -39,15 +40,13 @@ private:
     size_t dimensions;     // Number of dimensions for points
     size_t numPoints;      // Number of points
 
-    // Calculate Euclidean distance between two points
+    // Calculate Euclidean distance between two points (CPU version)
     double distance(const std::vector<double>& a, const std::vector<double>& b) const;
 
     // Assign each point to nearest centroid - CPU version
-    // Returns the number of points that changed clusters
     int assignClustersCPU();
     
     // Assign each point to nearest centroid - GPU version
-    // Returns the number of points that changed clusters
     int assignClustersGPU();
     
     // Combined function that calls either CPU or GPU version
@@ -68,11 +67,11 @@ private:
     // Free GPU memory
     void freeGPUMemory();
     
-    // Copy data to GPU
-    void copyToGPU();
+    // Copy initial data to GPU (called once)
+    void copyInitialDataToGPU();
     
-    // Copy results from GPU
-    void copyFromGPU();
+    // Copy results from GPU (called once at the end)
+    void copyFinalResultsFromGPU();
 
 public:
     KMeans(int numClusters, int maxIter = 100, double eps = 1e-4, bool gpu = false);

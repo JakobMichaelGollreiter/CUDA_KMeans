@@ -3,6 +3,7 @@
 #include <thrust/device_vector.h>
 #include <thrust/reduce.h>
 #include <thrust/execution_policy.h>
+#include <float.h>
 
 // Constant memory for centroids (faster access)
 __constant__ float c_centroids[1024]; // Supports up to 1024/dimensions centroids
@@ -10,8 +11,8 @@ __constant__ float c_centroidDistances[1024]; // Supports up to 32x32 centroids
 
 // CUDA kernel to assign points to nearest centroids
 __global__ void assignPointsToClusters(
-    const float* points,
-    const float* centroids, // Keep this for flexibility, even though we're using constant memory
+    const float* points_soa,  // Points in SoA format: dimension-major ordering
+    const float* centroids,   // Centroids in SoA format
     int* assignments,
     int* changes,
     int numPoints,
@@ -20,9 +21,6 @@ __global__ void assignPointsToClusters(
 ) {
     int pointIdx = blockIdx.x * blockDim.x + threadIdx.x;
     if (pointIdx >= numPoints) return;
-    
-    // Get the point
-    const float* point = &points[pointIdx * dimensions];
     
     // Find the nearest centroid
     float minDist = FLT_MAX;
@@ -46,12 +44,13 @@ __global__ void assignPointsToClusters(
     __syncthreads();
     
     for (int c = 0; c < numClusters; c++) {
-        const float* centroid = &s_centroids[c * dimensions];
-        
         // Calculate the squared distance
         float dist = 0.0f;
         for (int d = 0; d < dimensions; d++) {
-            float diff = point[d] - centroid[d];
+            // SoA layout for both points and centroids
+            // For point access: points_soa[d * numPoints + pointIdx]
+            // For centroid access: s_centroids[d * numClusters + c]
+            float diff = points_soa[d * numPoints + pointIdx] - s_centroids[d * numClusters + c];
             dist += diff * diff;
         }
         
@@ -71,7 +70,7 @@ __global__ void assignPointsToClusters(
 
 // CUDA kernel to calculate distances between centroids
 __global__ void calculateCentroidDistances(
-    const float* centroids,
+    const float* centroids,  // Centroids in SoA format
     float* centroidDistances,
     int numClusters,
     int dimensions
@@ -90,7 +89,8 @@ __global__ void calculateCentroidDistances(
     // Calculate squared distance between centroids
     float dist = 0.0f;
     for (int d = 0; d < dimensions; d++) {
-        float diff = centroids[i * dimensions + d] - centroids[j * dimensions + d];
+        // SoA layout for centroids: centroids[d * numClusters + c]
+        float diff = centroids[d * numClusters + i] - centroids[d * numClusters + j];
         dist += diff * diff;
     }
     
@@ -100,8 +100,8 @@ __global__ void calculateCentroidDistances(
 
 // CUDA kernel to assign points to nearest centroids using triangle inequality
 __global__ void assignPointsToClustersWithTriangleInequality(
-    const float* points,
-    const float* centroids,
+    const float* points_soa,  // Points in SoA format
+    const float* centroids,   // Centroids in SoA format
     const float* centroidDistances,
     float* pointCentroidDists,  // Store distances between points and centroids
     int* assignments,
@@ -113,14 +113,11 @@ __global__ void assignPointsToClustersWithTriangleInequality(
     int pointIdx = blockIdx.x * blockDim.x + threadIdx.x;
     if (pointIdx >= numPoints) return;
     
-    // Get the point
-    const float* point = &points[pointIdx * dimensions];
-    
     // Get current assignment and distance
     int currentCluster = assignments[pointIdx];
     float currentDist = FLT_MAX;
     
-    // Use shared memory to cache centroids
+    // Use shared memory to cache centroids and centroid distances
     extern __shared__ float s_data[];
     float* s_centroids = s_data;
     float* s_centroidDistances = &s_data[numClusters * dimensions];
@@ -151,10 +148,10 @@ __global__ void assignPointsToClustersWithTriangleInequality(
     
     // If the point is already assigned, calculate its distance to current centroid
     if (currentCluster >= 0) {
-        const float* currentCentroid = &s_centroids[currentCluster * dimensions];
         currentDist = 0.0f;
         for (int d = 0; d < dimensions; d++) {
-            float diff = point[d] - currentCentroid[d];
+            // SoA layout for both points and centroids
+            float diff = points_soa[d * numPoints + pointIdx] - s_centroids[d * numClusters + currentCluster];
             currentDist += diff * diff;
         }
         
@@ -183,10 +180,10 @@ __global__ void assignPointsToClustersWithTriangleInequality(
         }
         
         // Calculate distance to this centroid
-        const float* centroid = &s_centroids[c * dimensions];
         float dist = 0.0f;
         for (int d = 0; d < dimensions; d++) {
-            float diff = point[d] - centroid[d];
+            // SoA layout for both points and centroids
+            float diff = points_soa[d * numPoints + pointIdx] - s_centroids[d * numClusters + c];
             dist += diff * diff;
         }
         
@@ -209,67 +206,63 @@ __global__ void assignPointsToClustersWithTriangleInequality(
 
 // CUDA kernel to reset centroids and counts
 __global__ void resetCentroidsAndCounts(
-    float* centroids,
+    float* centroids,  // Centroids in SoA format
     int* counts,
     int numClusters,
     int dimensions
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= numClusters * dimensions) return;
+    if (idx >= dimensions * numClusters) return;
     
     centroids[idx] = 0.0f;
     
-    // Only reset counts once per cluster
+    // Only reset counts once per cluster (not for each dimension)
     if (idx < numClusters) {
         counts[idx] = 0;
     }
 }
 
-// CUDA kernel to accumulate points into centroids
+// CUDA kernel to accumulate points into centroids - simplified version with direct atomics
 __global__ void accumulatePointsIntoCentroids(
-    const float* points,
-    float* centroids,
+    const float* points_soa,  // Points in SoA format
+    float* centroids,        // Centroids in SoA format
     const int* assignments,
     int* counts,
     int numPoints,
-    int dimensions
+    int dimensions,
+    int numClusters
 ) {
     int pointIdx = blockIdx.x * blockDim.x + threadIdx.x;
     if (pointIdx >= numPoints) return;
     
     int cluster = assignments[pointIdx];
+    if (cluster < 0 || cluster >= numClusters) return; // Skip invalid assignments
+    
+    // Atomically increment the count for this cluster
     atomicAdd(&counts[cluster], 1);
     
-    // Get the point and its centroid
-    const float* point = &points[pointIdx * dimensions];
-    float* centroid = &centroids[cluster * dimensions];
-    
-    // Accumulate the point into its centroid
+    // Accumulate the point's features into the centroid
     for (int d = 0; d < dimensions; d++) {
-        atomicAdd(&centroid[d], point[d]);
+        atomicAdd(&centroids[d * numClusters + cluster], points_soa[d * numPoints + pointIdx]);
     }
 }
 
 // CUDA kernel to finalize centroids by dividing by counts
 __global__ void finalizeCentroids(
-    float* centroids,
+    float* centroids,  // Centroids in SoA format
     const int* counts,
     int numClusters,
     int dimensions
 ) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= numClusters * dimensions) return;
+    int d = blockIdx.x;
+    int c = threadIdx.x;
     
-    int cluster = idx / dimensions;
-    int count = counts[cluster];
+    if (d >= dimensions || c >= numClusters) return;
     
+    // SoA layout: centroids[d * numClusters + c]
+    int count = counts[c];
     if (count > 0) {
-        centroids[idx] /= count;
-    }
-    
-    // If we're using constant memory, update it
-    if (numClusters * dimensions <= 1024) {
-        // We can't directly write to constant memory, so this will be done by the host
+        centroids[d * numClusters + c] /= count;
     }
 }
 
@@ -293,11 +286,17 @@ extern "C" void calculateCentroidDistancesKernel(
         cudaMemcpyToSymbol(c_centroidDistances, d_centroidDistances, 
                            numClusters * numClusters * sizeof(float));
     }
+    
+    // Check for errors
+    cudaError_t error = cudaGetLastError();
+    if (error != cudaSuccess) {
+        printf("CUDA error in calculateCentroidDistancesKernel: %s\n", cudaGetErrorString(error));
+    }
 }
 
 // Host function to assign clusters using triangle inequality
 extern "C" int assignClustersWithTriangleInequalityKernel(
-    float* d_points,
+    float* d_points_soa,
     float* d_centroids,
     float* d_centroidDistances,
     float* d_pointCentroidDists,
@@ -321,9 +320,15 @@ extern "C" int assignClustersWithTriangleInequalityKernel(
     int sharedMemSize = (numClusters * dimensions + numClusters * numClusters) * sizeof(float);
     
     assignPointsToClustersWithTriangleInequality<<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(
-        d_points, d_centroids, d_centroidDistances, d_pointCentroidDists,
+        d_points_soa, d_centroids, d_centroidDistances, d_pointCentroidDists,
         d_assignments, d_changes, numPoints, numClusters, dimensions
     );
+    
+    // Check for errors
+    cudaError_t error = cudaGetLastError();
+    if (error != cudaSuccess) {
+        printf("CUDA error in assignClustersWithTriangleInequalityKernel: %s\n", cudaGetErrorString(error));
+    }
     
     // Copy the result back (only the change count, not all assignments)
     int changes;
@@ -334,7 +339,7 @@ extern "C" int assignClustersWithTriangleInequalityKernel(
 
 // Host function to assign clusters
 extern "C" int assignClustersKernel(
-    float* d_points,
+    float* d_points_soa,
     float* d_centroids,
     int* d_assignments,
     int* d_changes,
@@ -356,9 +361,15 @@ extern "C" int assignClustersKernel(
     int sharedMemSize = numClusters * dimensions * sizeof(float);
     
     assignPointsToClusters<<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(
-        d_points, d_centroids, d_assignments, d_changes, 
+        d_points_soa, d_centroids, d_assignments, d_changes, 
         numPoints, numClusters, dimensions
     );
+    
+    // Check for errors
+    cudaError_t error = cudaGetLastError();
+    if (error != cudaSuccess) {
+        printf("CUDA error in assignClustersKernel: %s\n", cudaGetErrorString(error));
+    }
     
     // Copy the result back (only the change count, not all assignments)
     int changes;
@@ -369,7 +380,7 @@ extern "C" int assignClustersKernel(
 
 // Host function to update centroids
 extern "C" void updateCentroidsKernel(
-    float* d_points,
+    float* d_points_soa,
     float* d_centroids,
     int* d_assignments,
     int* d_counts,
@@ -377,9 +388,8 @@ extern "C" void updateCentroidsKernel(
     int numClusters,
     int dimensions
 ) {
-    int threadsPerBlock = 256;
-    
     // Reset centroids and counts
+    int threadsPerBlock = 256;
     int totalCentroidValues = numClusters * dimensions;
     int resetBlocks = (totalCentroidValues + threadsPerBlock - 1) / threadsPerBlock;
     
@@ -387,18 +397,40 @@ extern "C" void updateCentroidsKernel(
         d_centroids, d_counts, numClusters, dimensions
     );
     
-    // Accumulate points into centroids
-    int accumulateBlocks = (numPoints + threadsPerBlock - 1) / threadsPerBlock;
+    // Check for errors
+    cudaError_t error = cudaGetLastError();
+    if (error != cudaSuccess) {
+        printf("CUDA error in resetCentroidsAndCounts: %s\n", cudaGetErrorString(error));
+    }
     
-    accumulatePointsIntoCentroids<<<accumulateBlocks, threadsPerBlock>>>(
-        d_points, d_centroids, d_assignments, d_counts,
-        numPoints, dimensions
+    // Accumulate points into centroids - using simplified direct atomic version
+    int accumulateThreads = 256;
+    int accumulateBlocks = (numPoints + accumulateThreads - 1) / accumulateThreads;
+    
+    accumulatePointsIntoCentroids<<<accumulateBlocks, accumulateThreads>>>(
+        d_points_soa, d_centroids, d_assignments, d_counts,
+        numPoints, dimensions, numClusters
     );
     
-    // Finalize centroids
-    finalizeCentroids<<<resetBlocks, threadsPerBlock>>>(
+    // Check for errors
+    error = cudaGetLastError();
+    if (error != cudaSuccess) {
+        printf("CUDA error in accumulatePointsIntoCentroids: %s\n", cudaGetErrorString(error));
+    }
+    
+    // Finalize centroids with one thread per dimension-cluster pair
+    dim3 finalizeBlock(numClusters);
+    dim3 finalizeGrid(dimensions);
+    
+    finalizeCentroids<<<finalizeGrid, finalizeBlock>>>(
         d_centroids, d_counts, numClusters, dimensions
     );
+    
+    // Check for errors
+    error = cudaGetLastError();
+    if (error != cudaSuccess) {
+        printf("CUDA error in finalizeCentroids: %s\n", cudaGetErrorString(error));
+    }
     
     // Update constant memory if needed
     if (numClusters * dimensions <= 1024) {

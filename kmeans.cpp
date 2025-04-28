@@ -10,7 +10,7 @@
 
 // External functions from CUDA
 extern "C" int assignClustersKernel(
-    float* d_points,
+    float* d_points_soa,
     float* d_centroids,
     int* d_assignments,
     int* d_changes,
@@ -20,7 +20,7 @@ extern "C" int assignClustersKernel(
 );
 
 extern "C" int assignClustersWithTriangleInequalityKernel(
-    float* d_points,
+    float* d_points_soa,
     float* d_centroids,
     float* d_centroidDistances,
     float* d_pointCentroidDists,
@@ -32,7 +32,7 @@ extern "C" int assignClustersWithTriangleInequalityKernel(
 );
 
 extern "C" void updateCentroidsKernel(
-    float* d_points,
+    float* d_points_soa,
     float* d_centroids,
     int* d_assignments,
     int* d_counts,
@@ -53,7 +53,7 @@ extern "C" bool isCUDAAvailable();
 // Constructor with parameters
 KMeans::KMeans(int numClusters, int maxIter, double eps, bool gpu, bool useTriangle) 
     : k(numClusters), maxIterations(maxIter), epsilon(eps), useGPU(gpu), useTriangleInequality(useTriangle),
-      d_points(nullptr), d_centroids(nullptr), d_centroidDistances(nullptr), d_assignments(nullptr), 
+      d_points_soa(nullptr), d_centroids(nullptr), d_centroidDistances(nullptr), d_assignments(nullptr), 
       d_changes(nullptr), d_counts(nullptr), d_pointCentroidDists(nullptr), dimensions(0), numPoints(0) {
     
     // Check if GPU usage is requested but not available
@@ -257,18 +257,18 @@ bool KMeans::loadCentroidsFromCSV(const std::string& filename, char delimiter) {
     return true;
 }
 
-// Allocate GPU memory
+// Allocate GPU memory - Updated for SoA layout
 void KMeans::allocateGPUMemory() {
     if (!useGPU) return;
     
     numPoints = points.size();
     dimensions = points[0].features.size();
     
-    // Allocate memory for points
-    cudaMalloc(&d_points, numPoints * dimensions * sizeof(float));
+    // Allocate memory for points in SoA format (dimension-major ordering)
+    cudaMalloc(&d_points_soa, dimensions * numPoints * sizeof(float));
     
-    // Allocate memory for centroids
-    cudaMalloc(&d_centroids, k * dimensions * sizeof(float));
+    // Allocate memory for centroids in SoA format
+    cudaMalloc(&d_centroids, dimensions * k * sizeof(float));
     
     // Allocate memory for centroid distances (if using triangle inequality)
     if (useTriangleInequality) {
@@ -287,11 +287,17 @@ void KMeans::allocateGPUMemory() {
     
     // Initialize assignments to -1
     cudaMemset(d_assignments, -1, numPoints * sizeof(int));
+    
+    // Check for CUDA errors
+    cudaError_t error = cudaGetLastError();
+    if (error != cudaSuccess) {
+        std::cerr << "CUDA error in allocateGPUMemory: " << cudaGetErrorString(error) << std::endl;
+    }
 }
 
 // Free GPU memory
 void KMeans::freeGPUMemory() {
-    if (d_points) cudaFree(d_points);
+    if (d_points_soa) cudaFree(d_points_soa);
     if (d_centroids) cudaFree(d_centroids);
     if (d_centroidDistances) cudaFree(d_centroidDistances);
     if (d_assignments) cudaFree(d_assignments);
@@ -299,7 +305,7 @@ void KMeans::freeGPUMemory() {
     if (d_counts) cudaFree(d_counts);
     if (d_pointCentroidDists) cudaFree(d_pointCentroidDists);
     
-    d_points = nullptr;
+    d_points_soa = nullptr;
     d_centroids = nullptr;
     d_centroidDistances = nullptr;
     d_assignments = nullptr;
@@ -308,27 +314,31 @@ void KMeans::freeGPUMemory() {
     d_pointCentroidDists = nullptr;
 }
 
-// Copy initial data to GPU - called once at the beginning
+// Copy initial data to GPU - Updated for SoA layout
 void KMeans::copyInitialDataToGPU() {
     if (!useGPU) return;
     
-    // Copy points to device
-    std::vector<float> h_points_flat(numPoints * dimensions);
-    for (size_t i = 0; i < numPoints; i++) {
-        for (size_t j = 0; j < dimensions; j++) {
-            h_points_flat[i * dimensions + j] = static_cast<float>(points[i].features[j]);
-        }
-    }
-    cudaMemcpy(d_points, h_points_flat.data(), numPoints * dimensions * sizeof(float), cudaMemcpyHostToDevice);
+    // Debug info
+    std::cout << "Converting data to SoA format for GPU - Points: " << numPoints 
+              << ", Dimensions: " << dimensions << ", Clusters: " << k << std::endl;
     
-    // Copy centroids to device
-    std::vector<float> h_centroids_flat(k * dimensions);
-    for (int i = 0; i < k; i++) {
-        for (size_t j = 0; j < dimensions; j++) {
-            h_centroids_flat[i * dimensions + j] = static_cast<float>(centroids[i][j]);
+    // Copy points to device in SoA format
+    std::vector<float> h_points_soa(dimensions * numPoints);
+    for (size_t d = 0; d < dimensions; d++) {
+        for (size_t i = 0; i < numPoints; i++) {
+            h_points_soa[d * numPoints + i] = static_cast<float>(points[i].features[d]);
         }
     }
-    cudaMemcpy(d_centroids, h_centroids_flat.data(), k * dimensions * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_points_soa, h_points_soa.data(), dimensions * numPoints * sizeof(float), cudaMemcpyHostToDevice);
+    
+    // Copy centroids to device in SoA format
+    std::vector<float> h_centroids_flat(dimensions * k);
+    for (size_t d = 0; d < dimensions; d++) {
+        for (int c = 0; c < k; c++) {
+            h_centroids_flat[d * k + c] = static_cast<float>(centroids[c][d]);
+        }
+    }
+    cudaMemcpy(d_centroids, h_centroids_flat.data(), dimensions * k * sizeof(float), cudaMemcpyHostToDevice);
     
     // If using triangle inequality, copy centroid distances
     if (useTriangleInequality) {
@@ -344,9 +354,43 @@ void KMeans::copyInitialDataToGPU() {
         }
         cudaMemcpy(d_centroidDistances, h_centroid_distances_flat.data(), k * k * sizeof(float), cudaMemcpyHostToDevice);
     }
+    
+    // Check for CUDA errors
+    cudaError_t error = cudaGetLastError();
+    if (error != cudaSuccess) {
+        std::cerr << "CUDA error in copyInitialDataToGPU: " << cudaGetErrorString(error) << std::endl;
+    }
+    
+    // Verify data transfer by spot-checking
+    verifyDataTransfer();
 }
 
-// Copy final results from GPU - called once at the end
+// Helper method to verify data transfer to GPU
+void KMeans::verifyDataTransfer() {
+    // Check a few random points to make sure they transferred correctly
+    std::vector<float> test_points(dimensions);
+    std::vector<float> test_centroids(k);
+    
+    // Check first dimension of points
+    cudaMemcpy(test_points.data(), d_points_soa, dimensions * sizeof(float), cudaMemcpyDeviceToHost);
+    std::cout << "Verifying points data transfer (first dimension):" << std::endl;
+    for (int i = 0; i < std::min(5, static_cast<int>(numPoints)); i++) {
+        float device_value = test_points[i];
+        float host_value = static_cast<float>(points[i].features[0]);
+        std::cout << "Point " << i << " dimension 0: Host=" << host_value << ", Device=" << device_value << std::endl;
+    }
+    
+    // Check first dimension of centroids
+    cudaMemcpy(test_centroids.data(), d_centroids, k * sizeof(float), cudaMemcpyDeviceToHost);
+    std::cout << "Verifying centroids data transfer (first dimension):" << std::endl;
+    for (int i = 0; i < std::min(5, k); i++) {
+        float device_value = test_centroids[i];
+        float host_value = static_cast<float>(centroids[i][0]);
+        std::cout << "Centroid " << i << " dimension 0: Host=" << host_value << ", Device=" << device_value << std::endl;
+    }
+}
+
+// Copy final results from GPU - Updated for SoA layout
 void KMeans::copyFinalResultsFromGPU() {
     if (!useGPU) return;
     
@@ -359,13 +403,19 @@ void KMeans::copyFinalResultsFromGPU() {
     }
     
     // Copy centroids back to host
-    std::vector<float> h_centroids_flat(k * dimensions);
-    cudaMemcpy(h_centroids_flat.data(), d_centroids, k * dimensions * sizeof(float), cudaMemcpyDeviceToHost);
+    std::vector<float> h_centroids_flat(dimensions * k);
+    cudaMemcpy(h_centroids_flat.data(), d_centroids, dimensions * k * sizeof(float), cudaMemcpyDeviceToHost);
     
-    for (int i = 0; i < k; i++) {
-        for (size_t j = 0; j < dimensions; j++) {
-            centroids[i][j] = static_cast<double>(h_centroids_flat[i * dimensions + j]);
+    for (int c = 0; c < k; c++) {
+        for (size_t d = 0; d < dimensions; d++) {
+            centroids[c][d] = static_cast<double>(h_centroids_flat[d * k + c]);
         }
+    }
+    
+    // Check for CUDA errors
+    cudaError_t error = cudaGetLastError();
+    if (error != cudaSuccess) {
+        std::cerr << "CUDA error in copyFinalResultsFromGPU: " << cudaGetErrorString(error) << std::endl;
     }
 }
 
@@ -478,26 +528,42 @@ int KMeans::assignClustersCPUWithTriangleInequality() {
     return changes;
 }
 
-// Assign clusters - GPU version
+// Assign clusters - GPU version - Updated for SoA layout
 int KMeans::assignClustersGPU() {
     // Call CUDA kernel - all processing stays on GPU
-    return assignClustersKernel(
-        d_points, d_centroids, d_assignments, d_changes,
+    int changes = assignClustersKernel(
+        d_points_soa, d_centroids, d_assignments, d_changes,
         static_cast<int>(numPoints), k, static_cast<int>(dimensions)
     );
+    
+    // Check for CUDA errors
+    cudaError_t error = cudaGetLastError();
+    if (error != cudaSuccess) {
+        std::cerr << "CUDA error in assignClustersGPU: " << cudaGetErrorString(error) << std::endl;
+    }
+    
+    return changes;
 }
 
-// Assign clusters - GPU version with triangle inequality
+// Assign clusters - GPU version with triangle inequality - Updated for SoA layout
 int KMeans::assignClustersGPUWithTriangleInequality() {
     // Update centroid distances
     calculateCentroidDistancesGPU();
     
     // Call CUDA kernel with triangle inequality optimization
-    return assignClustersWithTriangleInequalityKernel(
-        d_points, d_centroids, d_centroidDistances, d_pointCentroidDists, 
+    int changes = assignClustersWithTriangleInequalityKernel(
+        d_points_soa, d_centroids, d_centroidDistances, d_pointCentroidDists, 
         d_assignments, d_changes, static_cast<int>(numPoints), k, 
         static_cast<int>(dimensions)
     );
+    
+    // Check for CUDA errors
+    cudaError_t error = cudaGetLastError();
+    if (error != cudaSuccess) {
+        std::cerr << "CUDA error in assignClustersGPUWithTriangleInequality: " << cudaGetErrorString(error) << std::endl;
+    }
+    
+    return changes;
 }
 
 // Assign clusters - dispatcher
@@ -562,13 +628,19 @@ void KMeans::updateCentroidsCPU() {
     }
 }
 
-// Update centroids - GPU version
+// Update centroids - GPU version - Updated for SoA layout
 void KMeans::updateCentroidsGPU() {
     // Call CUDA kernel - all processing stays on GPU
     updateCentroidsKernel(
-        d_points, d_centroids, d_assignments, d_counts,
+        d_points_soa, d_centroids, d_assignments, d_counts,
         static_cast<int>(numPoints), k, static_cast<int>(dimensions)
     );
+    
+    // Check for CUDA errors
+    cudaError_t error = cudaGetLastError();
+    if (error != cudaSuccess) {
+        std::cerr << "CUDA error in updateCentroidsGPU: " << cudaGetErrorString(error) << std::endl;
+    }
     
     // If using triangle inequality, update centroid distances
     if (useTriangleInequality) {
@@ -585,7 +657,7 @@ void KMeans::updateCentroids() {
     }
 }
 
-// Prepare GPU memory (allocate and transfer) - NEW METHOD
+// Prepare GPU memory (allocate and transfer) - Updated for SoA layout
 void KMeans::prepareGPUMemory() {
     if (!useGPU) return;
     
@@ -615,7 +687,7 @@ void KMeans::prepareGPUMemory() {
         }
     }
     
-    std::cout << "Using GPU implementation for k-means clustering" << std::endl;
+    std::cout << "Using GPU implementation for k-means clustering with SoA layout" << std::endl;
     if (useTriangleInequality) {
         std::cout << "Using Triangle Inequality optimization" << std::endl;
     }
@@ -627,7 +699,7 @@ void KMeans::prepareGPUMemory() {
     copyInitialDataToGPU();
 }
 
-// Run just the algorithm iterations - NEW METHOD
+// Run the k-means algorithm iterations
 void KMeans::runAlgorithm() {
     if (points.empty()) {
         std::cerr << "Error: No data points loaded" << std::endl;
@@ -660,12 +732,40 @@ void KMeans::runAlgorithm() {
         
         std::cout << "Iteration " << iterations << ": " << changes << " points changed clusters" << std::endl;
         
+        // Check GPU memory for errors (debug only)
+        if (useGPU) {
+            verifyAssignments(iterations);
+        }
+        
     } while (changes > 0 && iterations < maxIterations);
     
     std::cout << "K-means converged after " << iterations << " iterations." << std::endl;
 }
 
-// Retrieve results from GPU - NEW METHOD
+// Helper method to verify assignments
+void KMeans::verifyAssignments(int iteration) {
+    if (!useGPU) return;
+    
+    // Sample a few assignments to check if they make sense
+    std::vector<int> sample_assignments(std::min(10, static_cast<int>(numPoints)));
+    cudaMemcpy(sample_assignments.data(), d_assignments, sample_assignments.size() * sizeof(int), cudaMemcpyDeviceToHost);
+    
+    std::cout << "Iteration " << iteration << " sample assignments: ";
+    for (int i = 0; i < sample_assignments.size(); i++) {
+        std::cout << sample_assignments[i] << " ";
+    }
+    std::cout << std::endl;
+    
+    // Check for invalid assignments
+    for (int i = 0; i < sample_assignments.size(); i++) {
+        if (sample_assignments[i] < 0 || sample_assignments[i] >= k) {
+            std::cerr << "ERROR: Invalid assignment detected at index " << i 
+                      << ": " << sample_assignments[i] << std::endl;
+        }
+    }
+}
+
+// Retrieve results from GPU
 void KMeans::retrieveResultsFromGPU() {
     if (!useGPU) return;
     
@@ -676,7 +776,7 @@ void KMeans::retrieveResultsFromGPU() {
     freeGPUMemory();
 }
 
-// Run the k-means algorithm - ORIGINAL METHOD (now calls the separate stages)
+// Run the k-means algorithm - calls the separate stages
 void KMeans::run() {
     // If using GPU, prepare memory
     if (useGPU) {

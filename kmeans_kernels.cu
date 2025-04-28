@@ -222,28 +222,96 @@ __global__ void resetCentroidsAndCounts(
     }
 }
 
-// CUDA kernel to accumulate points into centroids - simplified version with direct atomics
-__global__ void accumulatePointsIntoCentroids(
+// New version: Two-step reduction kernel for accumulating points
+// First step: Calculate local sums per block
+__global__ void accumulatePointsLocalSums(
     const float* points_soa,  // Points in SoA format
-    float* centroids,        // Centroids in SoA format
     const int* assignments,
-    int* counts,
+    float* blockSums,         // Block-level sums [blockIdx * numClusters * dimensions]
+    int* blockCounts,         // Block-level counts [blockIdx * numClusters]
     int numPoints,
-    int dimensions,
-    int numClusters
+    int numClusters,
+    int dimensions
 ) {
+    // Get global thread ID
     int pointIdx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (pointIdx >= numPoints) return;
     
-    int cluster = assignments[pointIdx];
-    if (cluster < 0 || cluster >= numClusters) return; // Skip invalid assignments
+    // Shared memory for local sums and counts within the block
+    extern __shared__ float s_data[];
+    float* s_sums = s_data;                                     // Size: dimensions * numClusters
+    int* s_counts = (int*)&s_data[dimensions * numClusters];    // Size: numClusters
     
-    // Atomically increment the count for this cluster
-    atomicAdd(&counts[cluster], 1);
+    // Initialize shared memory
+    for (int i = threadIdx.x; i < dimensions * numClusters; i += blockDim.x) {
+        s_sums[i] = 0.0f;
+    }
     
-    // Accumulate the point's features into the centroid
-    for (int d = 0; d < dimensions; d++) {
-        atomicAdd(&centroids[d * numClusters + cluster], points_soa[d * numPoints + pointIdx]);
+    for (int i = threadIdx.x; i < numClusters; i += blockDim.x) {
+        s_counts[i] = 0;
+    }
+    
+    __syncthreads();
+    
+    // Accumulate points only if within range
+    if (pointIdx < numPoints) {
+        int cluster = assignments[pointIdx];
+        if (cluster >= 0 && cluster < numClusters) {
+            // Increment cluster count for this block
+            atomicAdd(&s_counts[cluster], 1);
+            
+            // Accumulate point features (still uses atomics but within shared memory - much faster)
+            for (int d = 0; d < dimensions; d++) {
+                atomicAdd(&s_sums[d * numClusters + cluster], points_soa[d * numPoints + pointIdx]);
+            }
+        }
+    }
+    
+    __syncthreads();
+    
+    // Write block results to global memory
+    // Each block writes its own section of the blockSums and blockCounts arrays
+    for (int i = threadIdx.x; i < dimensions * numClusters; i += blockDim.x) {
+        blockSums[blockIdx.x * dimensions * numClusters + i] = s_sums[i];
+    }
+    
+    for (int i = threadIdx.x; i < numClusters; i += blockDim.x) {
+        blockCounts[blockIdx.x * numClusters + i] = s_counts[i];
+    }
+}
+
+// Second step: Merge block-level results into final centroids
+__global__ void mergeBlockSums(
+    float* blockSums,     // Block-level sums
+    int* blockCounts,     // Block-level counts
+    float* centroids,     // Final centroids
+    int* counts,          // Final counts
+    int numBlocks,
+    int numClusters,
+    int dimensions
+) {
+    // Each thread handles one centroid dimension
+    int dim = blockIdx.x;
+    int cluster = threadIdx.x;
+    
+    if (dim >= dimensions || cluster >= numClusters) return;
+    
+    float sum = 0.0f;
+    
+    // Accumulate from all blocks
+    for (int b = 0; b < numBlocks; b++) {
+        sum += blockSums[b * dimensions * numClusters + dim * numClusters + cluster];
+    }
+    
+    // Store accumulated sum
+    centroids[dim * numClusters + cluster] = sum;
+    
+    // For the first dimension, also accumulate counts
+    if (dim == 0) {
+        int count = 0;
+        for (int b = 0; b < numBlocks; b++) {
+            count += blockCounts[b * numClusters + cluster];
+        }
+        counts[cluster] = count;
     }
 }
 
@@ -378,7 +446,7 @@ extern "C" int assignClustersKernel(
     return changes;
 }
 
-// Host function to update centroids
+// Host function to update centroids - MODIFIED to use two-step reduction
 extern "C" void updateCentroidsKernel(
     float* d_points_soa,
     float* d_centroids,
@@ -403,19 +471,44 @@ extern "C" void updateCentroidsKernel(
         printf("CUDA error in resetCentroidsAndCounts: %s\n", cudaGetErrorString(error));
     }
     
-    // Accumulate points into centroids - using simplified direct atomic version
+    // First step: Calculate local sums per block
     int accumulateThreads = 256;
     int accumulateBlocks = (numPoints + accumulateThreads - 1) / accumulateThreads;
     
-    accumulatePointsIntoCentroids<<<accumulateBlocks, accumulateThreads>>>(
-        d_points_soa, d_centroids, d_assignments, d_counts,
-        numPoints, dimensions, numClusters
+    // Allocate memory for block-level results
+    float* d_blockSums;
+    int* d_blockCounts;
+    cudaMalloc(&d_blockSums, accumulateBlocks * dimensions * numClusters * sizeof(float));
+    cudaMalloc(&d_blockCounts, accumulateBlocks * numClusters * sizeof(int));
+    
+    // Calculate shared memory size
+    int sharedMemSize = (dimensions * numClusters * sizeof(float)) + (numClusters * sizeof(int));
+    
+    // Launch kernel to calculate local sums
+    accumulatePointsLocalSums<<<accumulateBlocks, accumulateThreads, sharedMemSize>>>(
+        d_points_soa, d_assignments, d_blockSums, d_blockCounts,
+        numPoints, numClusters, dimensions
     );
     
     // Check for errors
     error = cudaGetLastError();
     if (error != cudaSuccess) {
-        printf("CUDA error in accumulatePointsIntoCentroids: %s\n", cudaGetErrorString(error));
+        printf("CUDA error in accumulatePointsLocalSums: %s\n", cudaGetErrorString(error));
+    }
+    
+    // Second step: Merge block results
+    dim3 mergeBlock(numClusters);
+    dim3 mergeGrid(dimensions);
+    
+    mergeBlockSums<<<mergeGrid, mergeBlock>>>(
+        d_blockSums, d_blockCounts, d_centroids, d_counts,
+        accumulateBlocks, numClusters, dimensions
+    );
+    
+    // Check for errors
+    error = cudaGetLastError();
+    if (error != cudaSuccess) {
+        printf("CUDA error in mergeBlockSums: %s\n", cudaGetErrorString(error));
     }
     
     // Finalize centroids with one thread per dimension-cluster pair
@@ -431,6 +524,10 @@ extern "C" void updateCentroidsKernel(
     if (error != cudaSuccess) {
         printf("CUDA error in finalizeCentroids: %s\n", cudaGetErrorString(error));
     }
+    
+    // Free temporary memory
+    cudaFree(d_blockSums);
+    cudaFree(d_blockCounts);
     
     // Update constant memory if needed
     if (numClusters * dimensions <= 1024) {

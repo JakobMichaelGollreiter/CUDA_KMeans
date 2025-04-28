@@ -4,10 +4,13 @@
 #include <thrust/reduce.h>
 #include <thrust/execution_policy.h>
 
+// Constant memory for centroids (faster access)
+__constant__ float c_centroids[1024]; // Supports up to 1024/dimensions centroids
+
 // CUDA kernel to assign points to nearest centroids
 __global__ void assignPointsToClusters(
     const float* points,
-    const float* centroids,
+    const float* centroids, // Keep this for flexibility, even though we're using constant memory
     int* assignments,
     int* changes,
     int numPoints,
@@ -24,8 +27,25 @@ __global__ void assignPointsToClusters(
     float minDist = FLT_MAX;
     int bestCluster = -1;
     
+    // Use shared memory to cache centroids
+    extern __shared__ float s_centroids[];
+    
+    // Collaboratively load centroids into shared memory
+    for (int c = threadIdx.x; c < numClusters * dimensions; c += blockDim.x) {
+        if (c < numClusters * dimensions) {
+            // Use constant memory if available and dimensions aren't too large
+            if (numClusters * dimensions <= 1024) {
+                s_centroids[c] = c_centroids[c];
+            } else {
+                s_centroids[c] = centroids[c];
+            }
+        }
+    }
+    
+    __syncthreads();
+    
     for (int c = 0; c < numClusters; c++) {
-        const float* centroid = &centroids[c * dimensions];
+        const float* centroid = &s_centroids[c * dimensions];
         
         // Calculate the squared distance
         float dist = 0.0f;
@@ -107,6 +127,11 @@ __global__ void finalizeCentroids(
     if (count > 0) {
         centroids[idx] /= count;
     }
+    
+    // If we're using constant memory, update it
+    if (numClusters * dimensions <= 1024) {
+        // We can't directly write to constant memory, so this will be done by the host
+    }
 }
 
 // Host function to assign clusters
@@ -122,16 +147,22 @@ extern "C" int assignClustersKernel(
     // Reset the changes counter
     cudaMemset(d_changes, 0, sizeof(int));
     
-    // Launch the kernel
+    // Copy the current centroids to constant memory if they fit
+    if (numClusters * dimensions <= 1024) {
+        cudaMemcpyToSymbol(c_centroids, d_centroids, numClusters * dimensions * sizeof(float));
+    }
+    
+    // Launch the kernel with shared memory for centroids
     int threadsPerBlock = 256;
     int blocksPerGrid = (numPoints + threadsPerBlock - 1) / threadsPerBlock;
+    int sharedMemSize = numClusters * dimensions * sizeof(float);
     
-    assignPointsToClusters<<<blocksPerGrid, threadsPerBlock>>>(
+    assignPointsToClusters<<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(
         d_points, d_centroids, d_assignments, d_changes, 
         numPoints, numClusters, dimensions
     );
     
-    // Copy the result back
+    // Copy the result back (only the change count, not all assignments)
     int changes;
     cudaMemcpy(&changes, d_changes, sizeof(int), cudaMemcpyDeviceToHost);
     
@@ -170,6 +201,11 @@ extern "C" void updateCentroidsKernel(
     finalizeCentroids<<<resetBlocks, threadsPerBlock>>>(
         d_centroids, d_counts, numClusters, dimensions
     );
+    
+    // Update constant memory if needed
+    if (numClusters * dimensions <= 1024) {
+        cudaMemcpyToSymbol(c_centroids, d_centroids, numClusters * dimensions * sizeof(float));
+    }
 }
 
 // Function to check if CUDA is available

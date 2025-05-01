@@ -391,7 +391,8 @@ extern "C" int assignClustersWithTriangleInequalityKernel(
     }
     
     // Launch the kernel with shared memory for centroids and centroid distances
-    int threadsPerBlock = 256;
+    // int threadsPerBlock = 256;
+    int threadsPerBlock = 1024;
     int blocksPerGrid = (numPoints + threadsPerBlock - 1) / threadsPerBlock;
     int sharedMemSize = (numClusters * dimensions + numClusters * numClusters) * sizeof(float);
     

@@ -7,6 +7,7 @@
 #include <sstream>
 #include <limits>
 #include <algorithm>
+#include <chrono>
 
 // External functions from CUDA
 extern "C" int assignClustersKernel(
@@ -319,8 +320,8 @@ void KMeans::copyInitialDataToGPU() {
     if (!useGPU) return;
     
     // Debug info
-    std::cout << "Converting data to SoA format for GPU - Points: " << numPoints 
-              << ", Dimensions: " << dimensions << ", Clusters: " << k << std::endl;
+    // std::cout << "Converting data to SoA format for GPU - Points: " << numPoints 
+    //           << ", Dimensions: " << dimensions << ", Clusters: " << k << std::endl;
     
     // Copy points to device in SoA format
     std::vector<float> h_points_soa(dimensions * numPoints);
@@ -373,21 +374,21 @@ void KMeans::verifyDataTransfer() {
     
     // Check first dimension of points
     cudaMemcpy(test_points.data(), d_points_soa, dimensions * sizeof(float), cudaMemcpyDeviceToHost);
-    std::cout << "Verifying points data transfer (first dimension):" << std::endl;
-    for (int i = 0; i < std::min(5, static_cast<int>(numPoints)); i++) {
-        float device_value = test_points[i];
-        float host_value = static_cast<float>(points[i].features[0]);
-        std::cout << "Point " << i << " dimension 0: Host=" << host_value << ", Device=" << device_value << std::endl;
-    }
+    // std::cout << "Verifying points data transfer (first dimension):" << std::endl;
+    // for (int i = 0; i < std::min(5, static_cast<int>(numPoints)); i++) {
+    //     float device_value = test_points[i];
+    //     float host_value = static_cast<float>(points[i].features[0]);
+    //     std::cout << "Point " << i << " dimension 0: Host=" << host_value << ", Device=" << device_value << std::endl;
+    // }
     
     // Check first dimension of centroids
     cudaMemcpy(test_centroids.data(), d_centroids, k * sizeof(float), cudaMemcpyDeviceToHost);
-    std::cout << "Verifying centroids data transfer (first dimension):" << std::endl;
-    for (int i = 0; i < std::min(5, k); i++) {
-        float device_value = test_centroids[i];
-        float host_value = static_cast<float>(centroids[i][0]);
-        std::cout << "Centroid " << i << " dimension 0: Host=" << host_value << ", Device=" << device_value << std::endl;
-    }
+    // std::cout << "Verifying centroids data transfer (first dimension):" << std::endl;
+    // for (int i = 0; i < std::min(5, k); i++) {
+    //     float device_value = test_centroids[i];
+    //     float host_value = static_cast<float>(centroids[i][0]);
+    //     std::cout << "Centroid " << i << " dimension 0: Host=" << host_value << ", Device=" << device_value << std::endl;
+    // }
 }
 
 // Copy final results from GPU - Updated for SoA layout
@@ -658,23 +659,23 @@ void KMeans::updateCentroids() {
 }
 
 // Prepare GPU memory (allocate and transfer) - Updated for SoA layout
-void KMeans::prepareGPUMemory() {
-    if (!useGPU) return;
+double KMeans::prepareGPUMemory() {
+    if (!useGPU) return 0.0;
     
     if (points.empty()) {
         std::cerr << "Error: No data points loaded" << std::endl;
-        return;
+        return 0.0;
     }
     
     if (points.size() < static_cast<size_t>(k)) {
         std::cerr << "Error: Number of points (" << points.size() 
                   << ") must be at least equal to k (" << k << ")" << std::endl;
-        return;
+        return 0.0;
     }
     
     if (centroids.empty()) {
         std::cerr << "Error: Centroids not initialized. Please load centroids before running." << std::endl;
-        return;
+        return 0.0;
     }
     
     // Validate dimensions match
@@ -683,7 +684,7 @@ void KMeans::prepareGPUMemory() {
         if (centroid.size() != dim) {
             std::cerr << "Error: Dimension mismatch between data points (" 
                       << dim << ") and centroids" << std::endl;
-            return;
+            return 0.0;
         }
     }
     
@@ -696,8 +697,16 @@ void KMeans::prepareGPUMemory() {
     // Allocate GPU memory
     allocateGPUMemory();
     
+    // Start timing
+    std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
+
     // Copy data to GPU
     copyInitialDataToGPU();
+        
+    // End timing
+    std::chrono::high_resolution_clock::time_point end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> elapsed = end - start;
+    return elapsed.count(); // Return time in seconds
 }
 
 // Run the k-means algorithm iterations

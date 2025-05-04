@@ -32,10 +32,10 @@ def run_kmeans(dataset_path, init_centers_path, n_clusters, max_iterations=3):
     print("Initial centers shape: {}".format(initial_centers.shape))
     
     # Time KMeans fitting
-    start_time = time.time()
-    kmeans = KMeans(n_clusters=n_clusters, init=initial_centers, n_init=1, max_iter=max_iterations)
+    kmeans = KMeans(n_clusters=n_clusters, init=initial_centers, n_init=1, tol = 0.00, max_iter=max_iterations)
+    start_time = time.perf_counter()
     kmeans.fit(X)
-    elapsed_time = time.time() - start_time
+    elapsed_time = time.perf_counter() - start_time
     
     print("KMeans fitting time: {:.6f} seconds".format(elapsed_time))
     print("Number of iterations: {}".format(kmeans.n_iter_))

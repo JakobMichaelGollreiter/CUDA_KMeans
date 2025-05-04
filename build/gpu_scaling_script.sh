@@ -6,7 +6,7 @@ DATASET_DIR="../kmeans_datasets_csv"
 INIT_DIR="../kmeans_inits"
 OUTPUT_FILE="kmeans_performance_summary.txt"
 MAX_ITERATIONS=20
-USE_GPU=1          # Set to 1 to use GPU acceleration
+USE_GPU=0          # Set to 1 to use GPU acceleration
 USE_TRIANGLE=1     # Set to 1 to use Triangle Inequality optimization
 
 echo "=== KMeans Performance Benchmark ==="
@@ -98,7 +98,7 @@ for dataset_file in $dataset_files; do
         clusters_arg=$num_clusters
     fi
     
-    # Run kmeans with GPU flag and Triangle Inequality flag
+    # Run kmeans with parameters matching the C++ program
     echo "Running: $KMEANS_EXECUTABLE $dataset_file $init_file $clusters_arg $MAX_ITERATIONS $USE_GPU $USE_TRIANGLE"
     output=$("$KMEANS_EXECUTABLE" "$dataset_file" "$init_file" "$clusters_arg" "$MAX_ITERATIONS" "$USE_GPU" "$USE_TRIANGLE" 2>&1)
     run_status=$?
@@ -110,28 +110,17 @@ for dataset_file in $dataset_files; do
         continue
     fi
     
-    # Extract elapsed time from output - look for "Algorithm time" instead of "Elapsed time"
-    elapsed_time=$(echo "$output" | grep "Algorithm time" | awk '{print $4}')
+    # Extract elapsed time - fix the pattern to match "Algorithm time (excluding transfers): X seconds"
+    elapsed_time=$(echo "$output" | grep "Algorithm time" | sed -E 's/.*Algorithm time \(excluding transfers\): ([0-9.]+) seconds.*/\1/')
     
-    # Extract iterations - look for iterations completed
-    iterations=$(echo "$output" | grep "Total loop count" | awk '{print $NF}')
-    
+    # For debugging
     if [ -z "$elapsed_time" ]; then
-        # Fallback to old format if "Algorithm time" not found
-        elapsed_time=$(echo "$output" | grep "Elapsed time:" | awk '{print $3}')
-        
-        if [ -z "$elapsed_time" ]; then
-            echo "Warning: Could not extract elapsed time from output"
-            echo "Output:"
-            echo "$output"
-            continue
-        fi
+        echo "Warning: Could not extract elapsed time from output. Here's the relevant line:"
+        echo "$output" | grep -i "time"
     fi
     
-    if [ -z "$iterations" ]; then
-        echo "Warning: Could not extract iterations from output, using maximum"
-        iterations="$MAX_ITERATIONS"
-    fi
+    # Since iterations aren't explicitly output, we'll use max iterations as default
+    iterations="$MAX_ITERATIONS"
     
     # Write results to output file
     echo "$filename | $dimensions | $num_clusters | $num_points | $elapsed_time | $iterations" >> "$OUTPUT_FILE"

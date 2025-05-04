@@ -156,12 +156,12 @@ int main(int argc, char* argv[]) {
             clusterCounts[cluster]++;
         }
         
-        // Print cluster statistics
-        std::cout << "\nCluster point counts:" << std::endl;
-        std::cout << "---------------------" << std::endl;
-        for (int i = 0; i < numClusters; i++) {
-            std::cout << "Cluster " << i << ": " << clusterCounts[i] << " points" << std::endl;
-        }
+        // // Print cluster statistics
+        // std::cout << "\nCluster point counts:" << std::endl;
+        // std::cout << "---------------------" << std::endl;
+        // for (int i = 0; i < numClusters; i++) {
+        //     std::cout << "Cluster " << i << ": " << clusterCounts[i] << " points" << std::endl;
+        // }
         
         std::cout << "\nSum of Squared Errors (SSE): " << kmeans.calculateSSE() << std::endl;
         

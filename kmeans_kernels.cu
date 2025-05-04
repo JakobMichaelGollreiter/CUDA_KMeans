@@ -18,10 +18,14 @@ __global__ void assignPointsToClusters(
     int* changes,
     int numPoints,
     int numClusters,
-    int dimensions
+    int dimensions,
+    int startIdx = 0
 ) {
     int pointIdx = blockIdx.x * blockDim.x + threadIdx.x;
     if (pointIdx >= numPoints) return;
+    
+    // Adjust pointIdx if using batches
+    int globalPointIdx = startIdx + pointIdx;
     
     // Find the nearest centroid
     float minDist = FLT_MAX;
@@ -65,9 +69,9 @@ __global__ void assignPointsToClusters(
     }
     
     // Check if the assignment changed
-    int oldCluster = assignments[pointIdx];
+    int oldCluster = assignments[globalPointIdx];
     if (oldCluster != bestCluster) {
-        assignments[pointIdx] = bestCluster;
+        assignments[globalPointIdx] = bestCluster;
         atomicAdd(changes, 1);
     }
 }
@@ -79,6 +83,9 @@ __global__ void calculateCentroidDistances(
     int numClusters,
     int dimensions
 ) {
+    // Check if thread count exceeds hardware limit
+    if (blockDim.x * blockDim.y > 1024) return;
+
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     int j = blockIdx.y * blockDim.y + threadIdx.y;
     
@@ -112,19 +119,30 @@ __global__ void assignPointsToClustersWithTriangleInequality(
     int* changes,
     int numPoints,
     int numClusters,
-    int dimensions
+    int dimensions,
+    int startIdx = 0
 ) {
     int pointIdx = blockIdx.x * blockDim.x + threadIdx.x;
     if (pointIdx >= numPoints) return;
     
+    // Adjust pointIdx if using batches
+    int globalPointIdx = startIdx + pointIdx;
+    
     // Get current assignment and distance
-    int currentCluster = assignments[pointIdx];
+    int currentCluster = assignments[globalPointIdx];
     float currentDist = FLT_MAX;
+    
+    // Calculate max shared memory needed
+    int maxSharedMemNeeded = (numClusters * dimensions + numClusters * numClusters) * sizeof(float);
+    
+    // Check if we have enough shared memory
+    bool useSharedForCentroidDistances = (maxSharedMemNeeded <= 48 * 1024); // 48KB is typical max
     
     // Use shared memory to cache centroids and centroid distances
     extern __shared__ float s_data[];
     float* s_centroids = s_data;
-    float* s_centroidDistances = &s_data[numClusters * dimensions];
+    float* s_centroidDistances = useSharedForCentroidDistances ? 
+                                &s_data[numClusters * dimensions] : NULL;
     
     // Collaboratively load centroids into shared memory
     for (int c = threadIdx.x; c < numClusters * dimensions; c += blockDim.x) {
@@ -137,13 +155,15 @@ __global__ void assignPointsToClustersWithTriangleInequality(
         }
     }
     
-    // Collaboratively load centroid distances into shared memory
-    for (int c = threadIdx.x; c < numClusters * numClusters; c += blockDim.x) {
-        if (c < numClusters * numClusters) {
-            if (numClusters * numClusters <= 1024) {
-                s_centroidDistances[c] = c_centroidDistances[c];
-            } else {
-                s_centroidDistances[c] = centroidDistances[c];
+    // Collaboratively load centroid distances into shared memory if space allows
+    if (useSharedForCentroidDistances) {
+        for (int c = threadIdx.x; c < numClusters * numClusters; c += blockDim.x) {
+            if (c < numClusters * numClusters) {
+                if (numClusters * numClusters <= 1024) {
+                    s_centroidDistances[c] = c_centroidDistances[c];
+                } else {
+                    s_centroidDistances[c] = centroidDistances[c];
+                }
             }
         }
     }
@@ -162,8 +182,11 @@ __global__ void assignPointsToClustersWithTriangleInequality(
         // Convert to regular Euclidean distance
         currentDist = sqrtf(dist_squared);
         
-        // Store the distance
-        pointCentroidDists[pointIdx * numClusters + currentCluster] = currentDist;
+        // Store the distance (use global point index)
+        int distIdx = globalPointIdx * numClusters + currentCluster;
+        if (distIdx < numPoints * numClusters) {  // Safety check
+            pointCentroidDists[distIdx] = currentDist;
+        }
     }
     
     float minDist = currentDist;
@@ -176,7 +199,14 @@ __global__ void assignPointsToClustersWithTriangleInequality(
         
         // If we already have an assignment, use triangle inequality to avoid unnecessary calculations
         if (currentCluster >= 0) {
-            float centroidDist = s_centroidDistances[c * numClusters + currentCluster];
+            float centroidDist;
+            
+            if (useSharedForCentroidDistances) {
+                centroidDist = s_centroidDistances[c * numClusters + currentCluster];
+            } else {
+                // Use global memory if shared memory isn't enough
+                centroidDist = centroidDistances[c * numClusters + currentCluster];
+            }
             
             // If d(centroid_c, centroid_current) > 2 * d(point, centroid_current),
             // then centroid_c cannot be closer to the point than centroid_current
@@ -196,8 +226,11 @@ __global__ void assignPointsToClustersWithTriangleInequality(
         // Convert to regular Euclidean distance
         float dist = sqrtf(dist_squared);
         
-        // Store the distance
-        pointCentroidDists[pointIdx * numClusters + c] = dist;
+        // Store the distance (use global point index)
+        int distIdx = globalPointIdx * numClusters + c;
+        if (distIdx < numPoints * numClusters) {  // Safety check
+            pointCentroidDists[distIdx] = dist;
+        }
         
         // Update if closer
         if (dist < minDist) {
@@ -208,7 +241,7 @@ __global__ void assignPointsToClustersWithTriangleInequality(
     
     // Check if the assignment changed
     if (currentCluster != bestCluster) {
-        assignments[pointIdx] = bestCluster;
+        assignments[globalPointIdx] = bestCluster;
         atomicAdd(changes, 1);
     }
 }
@@ -239,51 +272,102 @@ __global__ void accumulatePointsLocalSums(
     int* blockCounts,         // Block-level counts [blockIdx * numClusters]
     int numPoints,
     int numClusters,
-    int dimensions
+    int dimensions,
+    int startIdx = 0
 ) {
     // Get global thread ID
     int pointIdx = blockIdx.x * blockDim.x + threadIdx.x;
     
+    // Adjust pointIdx if using batches
+    int globalPointIdx = startIdx + pointIdx;
+    
+    // Calculate shared memory size needed
+    int sharedMemSize = (dimensions * numClusters * sizeof(float)) + (numClusters * sizeof(int));
+    
+    // Limit shared memory usage
+    const int MAX_SHARED_MEM = 48 * 1024; // 48KB is typical max
+    
+    // If we need too much shared memory, adjust to a smaller number of dimensions
+    // or clusters to process at once
+    bool useFullSharedMem = (sharedMemSize <= MAX_SHARED_MEM);
+    
     // Shared memory for local sums and counts within the block
     extern __shared__ float s_data[];
     float* s_sums = s_data;                                     // Size: dimensions * numClusters
-    int* s_counts = (int*)&s_data[dimensions * numClusters];    // Size: numClusters
+    int* s_counts = useFullSharedMem ? 
+                    (int*)&s_data[dimensions * numClusters] :   // Use shared memory if available
+                    nullptr;                                    // Otherwise, use global memory directly
     
     // Initialize shared memory
-    for (int i = threadIdx.x; i < dimensions * numClusters; i += blockDim.x) {
-        s_sums[i] = 0.0f;
-    }
-    
-    for (int i = threadIdx.x; i < numClusters; i += blockDim.x) {
-        s_counts[i] = 0;
-    }
-    
-    __syncthreads();
-    
-    // Accumulate points only if within range
-    if (pointIdx < numPoints) {
-        int cluster = assignments[pointIdx];
-        if (cluster >= 0 && cluster < numClusters) {
-            // Increment cluster count for this block
-            atomicAdd(&s_counts[cluster], 1);
-            
-            // Accumulate point features (still uses atomics but within shared memory - much faster)
-            for (int d = 0; d < dimensions; d++) {
-                atomicAdd(&s_sums[d * numClusters + cluster], points_soa[d * numPoints + pointIdx]);
+    if (useFullSharedMem) {
+        for (int i = threadIdx.x; i < dimensions * numClusters; i += blockDim.x) {
+            if (i < dimensions * numClusters) {
+                s_sums[i] = 0.0f;
+            }
+        }
+        
+        for (int i = threadIdx.x; i < numClusters; i += blockDim.x) {
+            if (i < numClusters) {
+                s_counts[i] = 0;
+            }
+        }
+    } else {
+        // Initialize directly in global memory
+        for (int i = threadIdx.x; i < dimensions * numClusters; i += blockDim.x) {
+            if (i < dimensions * numClusters) {
+                blockSums[blockIdx.x * dimensions * numClusters + i] = 0.0f;
+            }
+        }
+        
+        for (int i = threadIdx.x; i < numClusters; i += blockDim.x) {
+            if (i < numClusters) {
+                blockCounts[blockIdx.x * numClusters + i] = 0;
             }
         }
     }
     
     __syncthreads();
     
-    // Write block results to global memory
-    // Each block writes its own section of the blockSums and blockCounts arrays
-    for (int i = threadIdx.x; i < dimensions * numClusters; i += blockDim.x) {
-        blockSums[blockIdx.x * dimensions * numClusters + i] = s_sums[i];
+    // Accumulate points only if within range
+    if (pointIdx < numPoints) {
+        int cluster = assignments[globalPointIdx];
+        if (cluster >= 0 && cluster < numClusters) {
+            // Increment cluster count
+            if (useFullSharedMem) {
+                // Use shared memory atomics
+                atomicAdd(&s_counts[cluster], 1);
+                
+                // Accumulate point features
+                for (int d = 0; d < dimensions; d++) {
+                    atomicAdd(&s_sums[d * numClusters + cluster], points_soa[d * numPoints + pointIdx]);
+                }
+            } else {
+                // Use global memory atomics
+                atomicAdd(&blockCounts[blockIdx.x * numClusters + cluster], 1);
+                
+                for (int d = 0; d < dimensions; d++) {
+                    atomicAdd(&blockSums[blockIdx.x * dimensions * numClusters + d * numClusters + cluster], 
+                            points_soa[d * numPoints + pointIdx]);
+                }
+            }
+        }
     }
     
-    for (int i = threadIdx.x; i < numClusters; i += blockDim.x) {
-        blockCounts[blockIdx.x * numClusters + i] = s_counts[i];
+    __syncthreads();
+    
+    // Write block results to global memory if we used shared memory
+    if (useFullSharedMem) {
+        for (int i = threadIdx.x; i < dimensions * numClusters; i += blockDim.x) {
+            if (i < dimensions * numClusters) {
+                blockSums[blockIdx.x * dimensions * numClusters + i] = s_sums[i];
+            }
+        }
+        
+        for (int i = threadIdx.x; i < numClusters; i += blockDim.x) {
+            if (i < numClusters) {
+                blockCounts[blockIdx.x * numClusters + i] = s_counts[i];
+            }
+        }
     }
 }
 
@@ -297,29 +381,57 @@ __global__ void mergeBlockSums(
     int numClusters,
     int dimensions
 ) {
-    // Each thread handles one centroid dimension
-    int dim = blockIdx.x;
-    int cluster = threadIdx.x;
+    // Handle case where numClusters > 1024 (max threads per block)
+    // Each thread handles one dimension-cluster pair
+    int clusterIdx = blockIdx.y * blockDim.y + threadIdx.y;
+    int dimIdx = blockIdx.x * blockDim.x + threadIdx.x;
     
-    if (dim >= dimensions || cluster >= numClusters) return;
+    if (dimIdx >= dimensions || clusterIdx >= numClusters) return;
     
     float sum = 0.0f;
     
     // Accumulate from all blocks
     for (int b = 0; b < numBlocks; b++) {
-        sum += blockSums[b * dimensions * numClusters + dim * numClusters + cluster];
+        sum += blockSums[b * dimensions * numClusters + dimIdx * numClusters + clusterIdx];
     }
     
     // Store accumulated sum
-    centroids[dim * numClusters + cluster] = sum;
+    centroids[dimIdx * numClusters + clusterIdx] = sum;
     
     // For the first dimension, also accumulate counts
-    if (dim == 0) {
+    if (dimIdx == 0) {
         int count = 0;
         for (int b = 0; b < numBlocks; b++) {
-            count += blockCounts[b * numClusters + cluster];
+            count += blockCounts[b * numClusters + clusterIdx];
         }
-        counts[cluster] = count;
+        counts[clusterIdx] = count;
+    }
+}
+
+// Kernel to accumulate batch centroids (for mini-batching)
+__global__ void accumulateBatchCentroids(
+    const float* batchCentroids,  // Batch centroids in SoA format
+    const int* batchCounts,       // Batch counts
+    float* accumulatedCentroids,  // Accumulated centroids across batches
+    int* accumulatedCounts,       // Accumulated counts across batches
+    int numClusters,
+    int dimensions
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= dimensions * numClusters) return;
+    
+    // Accumulate centroids (pre-weighted by counts to facilitate averaging)
+    int cluster = idx % numClusters;
+    int count = batchCounts[cluster];
+    
+    if (count > 0) {
+        float weightedSum = batchCentroids[idx] * count;
+        atomicAdd(&accumulatedCentroids[idx], weightedSum);
+        
+        // Only accumulate counts once per cluster
+        if (idx < numClusters) {
+            atomicAdd(&accumulatedCounts[cluster], count);
+        }
     }
 }
 
@@ -330,15 +442,41 @@ __global__ void finalizeCentroids(
     int numClusters,
     int dimensions
 ) {
-    int d = blockIdx.x;
-    int c = threadIdx.x;
+    // Handle case where numClusters > 1024 (max threads per block)
+    int dimIdx = blockIdx.x * blockDim.x + threadIdx.x;
+    int clusterIdx = blockIdx.y * blockDim.y + threadIdx.y;
     
-    if (d >= dimensions || c >= numClusters) return;
+    if (dimIdx >= dimensions || clusterIdx >= numClusters) return;
     
     // SoA layout: centroids[d * numClusters + c]
-    int count = counts[c];
+    int count = counts[clusterIdx];
     if (count > 0) {
-        centroids[d * numClusters + c] /= count;
+        centroids[dimIdx * numClusters + clusterIdx] /= count;
+    }
+}
+
+// Wrapper function for finalizeCentroids kernel
+extern "C" void finalizeCentroidsKernel(
+    float* centroids,
+    const int* counts,
+    int numClusters,
+    int dimensions, 
+    int gridSizeX,
+    int gridSizeY,
+    int blockSizeX,
+    int blockSizeY
+) {
+    dim3 gridSize(gridSizeX, gridSizeY);
+    dim3 blockSize(blockSizeX, blockSizeY);
+    
+    finalizeCentroids<<<gridSize, blockSize>>>(
+        centroids, counts, numClusters, dimensions
+    );
+    
+    // Check for errors
+    cudaError_t error = cudaGetLastError();
+    if (error != cudaSuccess) {
+        printf("CUDA error in finalizeCentroidsKernel: %s\n", cudaGetErrorString(error));
     }
 }
 
@@ -349,7 +487,9 @@ extern "C" void calculateCentroidDistancesKernel(
     int numClusters,
     int dimensions
 ) {
-    dim3 blockSize(16, 16);
+    // Handle large cluster counts with appropriate grid/block sizes
+    int maxThreadsPerBlock = 32; // Adjust based on your GPU
+    dim3 blockSize(std::min(maxThreadsPerBlock, numClusters), std::min(maxThreadsPerBlock, numClusters));
     dim3 gridSize((numClusters + blockSize.x - 1) / blockSize.x, 
                   (numClusters + blockSize.y - 1) / blockSize.y);
     
@@ -380,7 +520,8 @@ extern "C" int assignClustersWithTriangleInequalityKernel(
     int* d_changes,
     int numPoints,
     int numClusters,
-    int dimensions
+    int dimensions,
+    int startIdx = 0
 ) {
     // Reset the changes counter
     cudaMemset(d_changes, 0, sizeof(int));
@@ -390,14 +531,20 @@ extern "C" int assignClustersWithTriangleInequalityKernel(
         cudaMemcpyToSymbol(c_centroids, d_centroids, numClusters * dimensions * sizeof(float));
     }
     
-    // Launch the kernel with shared memory for centroids and centroid distances
+    // Calculate shared memory size needed
+    int maxSharedMemNeeded = (numClusters * dimensions + numClusters * numClusters) * sizeof(float);
+    
+    // Limit shared memory usage to what's available
+    const int MAX_SHARED_MEM = 48 * 1024; // 48KB is typical max
+    int sharedMemSize = std::min(maxSharedMemNeeded, MAX_SHARED_MEM);
+    
+    // Launch the kernel with limited shared memory
     int threadsPerBlock = 256;
     int blocksPerGrid = (numPoints + threadsPerBlock - 1) / threadsPerBlock;
-    int sharedMemSize = (numClusters * dimensions + numClusters * numClusters) * sizeof(float);
     
     assignPointsToClustersWithTriangleInequality<<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(
         d_points_soa, d_centroids, d_centroidDistances, d_pointCentroidDists,
-        d_assignments, d_changes, numPoints, numClusters, dimensions
+        d_assignments, d_changes, numPoints, numClusters, dimensions, startIdx
     );
     
     // Check for errors
@@ -421,7 +568,8 @@ extern "C" int assignClustersKernel(
     int* d_changes,
     int numPoints,
     int numClusters,
-    int dimensions
+    int dimensions,
+    int startIdx = 0
 ) {
     // Reset the changes counter
     cudaMemset(d_changes, 0, sizeof(int));
@@ -431,14 +579,20 @@ extern "C" int assignClustersKernel(
         cudaMemcpyToSymbol(c_centroids, d_centroids, numClusters * dimensions * sizeof(float));
     }
     
+    // Calculate shared memory size needed
+    int sharedMemSize = numClusters * dimensions * sizeof(float);
+    
+    // Limit shared memory usage
+    const int MAX_SHARED_MEM = 48 * 1024; // 48KB is typical max
+    sharedMemSize = std::min(sharedMemSize, MAX_SHARED_MEM);
+    
     // Launch the kernel with shared memory for centroids
     int threadsPerBlock = 256;
     int blocksPerGrid = (numPoints + threadsPerBlock - 1) / threadsPerBlock;
-    int sharedMemSize = numClusters * dimensions * sizeof(float);
     
     assignPointsToClusters<<<blocksPerGrid, threadsPerBlock, sharedMemSize>>>(
         d_points_soa, d_centroids, d_assignments, d_changes, 
-        numPoints, numClusters, dimensions
+        numPoints, numClusters, dimensions, startIdx
     );
     
     // Check for errors
@@ -454,6 +608,30 @@ extern "C" int assignClustersKernel(
     return changes;
 }
 
+// Host function to accumulate batch centroids
+extern "C" void accumulateBatchCentroidsKernel(
+    float* d_batchCentroids,
+    int* d_batchCounts,
+    float* d_accumulatedCentroids,
+    int* d_accumulatedCounts,
+    int numClusters,
+    int dimensions
+) {
+    int threadsPerBlock = 256;
+    int blocksPerGrid = (dimensions * numClusters + threadsPerBlock - 1) / threadsPerBlock;
+    
+    accumulateBatchCentroids<<<blocksPerGrid, threadsPerBlock>>>(
+        d_batchCentroids, d_batchCounts, d_accumulatedCentroids, d_accumulatedCounts,
+        numClusters, dimensions
+    );
+    
+    // Check for errors
+    cudaError_t error = cudaGetLastError();
+    if (error != cudaSuccess) {
+        printf("CUDA error in accumulateBatchCentroidsKernel: %s\n", cudaGetErrorString(error));
+    }
+}
+
 // Host function to update centroids - MODIFIED to use two-step reduction
 extern "C" void updateCentroidsKernel(
     float* d_points_soa,
@@ -462,7 +640,8 @@ extern "C" void updateCentroidsKernel(
     int* d_counts,
     int numPoints,
     int numClusters,
-    int dimensions
+    int dimensions,
+    int startIdx = 0
 ) {
     // Reset centroids and counts
     int threadsPerBlock = 256;
@@ -489,13 +668,17 @@ extern "C" void updateCentroidsKernel(
     cudaMalloc(&d_blockSums, accumulateBlocks * dimensions * numClusters * sizeof(float));
     cudaMalloc(&d_blockCounts, accumulateBlocks * numClusters * sizeof(int));
     
-    // Calculate shared memory size
+    // Calculate shared memory size needed
     int sharedMemSize = (dimensions * numClusters * sizeof(float)) + (numClusters * sizeof(int));
+    
+    // Limit shared memory usage
+    const int MAX_SHARED_MEM = 48 * 1024; // 48KB is typical max
+    sharedMemSize = std::min(sharedMemSize, MAX_SHARED_MEM);
     
     // Launch kernel to calculate local sums
     accumulatePointsLocalSums<<<accumulateBlocks, accumulateThreads, sharedMemSize>>>(
         d_points_soa, d_assignments, d_blockSums, d_blockCounts,
-        numPoints, numClusters, dimensions
+        numPoints, numClusters, dimensions, startIdx
     );
     
     // Check for errors
@@ -505,10 +688,13 @@ extern "C" void updateCentroidsKernel(
     }
     
     // Second step: Merge block results
-    dim3 mergeBlock(numClusters);
-    dim3 mergeGrid(dimensions);
+    // Handle case where numClusters > 1024 (max threads per block)
+    int maxThreads = 32; // Adjust based on GPU
+    dim3 mergeBlockSize(std::min(maxThreads, dimensions), std::min(maxThreads, numClusters));
+    dim3 mergeGridSize((dimensions + mergeBlockSize.x - 1) / mergeBlockSize.x,
+                       (numClusters + mergeBlockSize.y - 1) / mergeBlockSize.y);
     
-    mergeBlockSums<<<mergeGrid, mergeBlock>>>(
+    mergeBlockSums<<<mergeGridSize, mergeBlockSize>>>(
         d_blockSums, d_blockCounts, d_centroids, d_counts,
         accumulateBlocks, numClusters, dimensions
     );
@@ -519,11 +705,12 @@ extern "C" void updateCentroidsKernel(
         printf("CUDA error in mergeBlockSums: %s\n", cudaGetErrorString(error));
     }
     
-    // Finalize centroids with one thread per dimension-cluster pair
-    dim3 finalizeBlock(numClusters);
-    dim3 finalizeGrid(dimensions);
+    // Finalize centroids with appropriate grid/block configuration
+    dim3 finalizeBlockSize(std::min(32, dimensions), std::min(32, numClusters));
+    dim3 finalizeGridSize((dimensions + finalizeBlockSize.x - 1) / finalizeBlockSize.x,
+                          (numClusters + finalizeBlockSize.y - 1) / finalizeBlockSize.y);
     
-    finalizeCentroids<<<finalizeGrid, finalizeBlock>>>(
+    finalizeCentroids<<<finalizeGridSize, finalizeBlockSize>>>(
         d_centroids, d_counts, numClusters, dimensions
     );
     
@@ -549,4 +736,9 @@ extern "C" bool isCUDAAvailable() {
     cudaError_t error = cudaGetDeviceCount(&deviceCount);
     
     return (error == cudaSuccess && deviceCount > 0);
+}
+
+// Function to get available GPU memory
+extern "C" void getAvailableGPUMemory(size_t* free, size_t* total) {
+    cudaMemGetInfo(free, total);
 }

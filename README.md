@@ -1,4 +1,4 @@
-Changes made here: fixed issue with triangle inequality.
+Changes made here: Added minibatching. 
 
 
 mkdir build

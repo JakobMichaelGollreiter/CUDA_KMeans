@@ -7,6 +7,8 @@
 #include <sstream>
 #include <limits>
 #include <algorithm>
+#include <cstddef>
+#include <cuda_runtime.h>
 
 // External functions from CUDA
 extern "C" int assignClustersKernel(
@@ -16,7 +18,8 @@ extern "C" int assignClustersKernel(
     int* d_changes,
     int numPoints,
     int numClusters,
-    int dimensions
+    int dimensions,
+    int startIdx = 0
 );
 
 extern "C" int assignClustersWithTriangleInequalityKernel(
@@ -28,7 +31,8 @@ extern "C" int assignClustersWithTriangleInequalityKernel(
     int* d_changes,
     int numPoints,
     int numClusters,
-    int dimensions
+    int dimensions,
+    int startIdx = 0
 );
 
 extern "C" void updateCentroidsKernel(
@@ -38,7 +42,8 @@ extern "C" void updateCentroidsKernel(
     int* d_counts,
     int numPoints,
     int numClusters,
-    int dimensions
+    int dimensions,
+    int startIdx = 0
 );
 
 extern "C" void calculateCentroidDistancesKernel(
@@ -48,13 +53,36 @@ extern "C" void calculateCentroidDistancesKernel(
     int dimensions
 );
 
+extern "C" void accumulateBatchCentroidsKernel(
+    float* d_batchCentroids,
+    int* d_batchCounts,
+    float* d_accumulatedCentroids,
+    int* d_accumulatedCounts,
+    int numClusters,
+    int dimensions
+);
+
+extern "C" void finalizeCentroidsKernel(
+    float* centroids,
+    const int* counts,
+    int numClusters,
+    int dimensions,
+    int gridSizeX,
+    int gridSizeY,
+    int blockSizeX,
+    int blockSizeY
+);
+
 extern "C" bool isCUDAAvailable();
+
+extern "C" void getAvailableGPUMemory(size_t* free, size_t* total);
 
 // Constructor with parameters
 KMeans::KMeans(int numClusters, int maxIter, double eps, bool gpu, bool useTriangle) 
     : k(numClusters), maxIterations(maxIter), epsilon(eps), useGPU(gpu), useTriangleInequality(useTriangle),
-      d_points_soa(nullptr), d_centroids(nullptr), d_centroidDistances(nullptr), d_assignments(nullptr), 
-      d_changes(nullptr), d_counts(nullptr), d_pointCentroidDists(nullptr), dimensions(0), numPoints(0) {
+      batchSize(0), d_points_soa(nullptr), d_centroids(nullptr), d_centroidDistances(nullptr), 
+      d_assignments(nullptr), d_changes(nullptr), d_counts(nullptr), d_pointCentroidDists(nullptr),
+      d_accumulated_centroids(nullptr), d_accumulated_counts(nullptr), dimensions(0), numPoints(0) {
     
     // Check if GPU usage is requested but not available
     if (useGPU && !isCUDAAvailable()) {
@@ -139,9 +167,119 @@ void KMeans::setUseTriangleInequality(bool use) {
     useTriangleInequality = use;
 }
 
+// Set batch size manually
+void KMeans::setBatchSize(int size) {
+    batchSize = size;
+}
+
 // Check if CUDA is available
 bool KMeans::isCUDAAvailable() {
     return ::isCUDAAvailable();
+}
+
+// Estimate memory requirements for the algorithm
+size_t KMeans::estimateMemoryRequirements() {
+    size_t memoryNeeded = 0;
+    
+    // Points in SoA format
+    memoryNeeded += numPoints * dimensions * sizeof(float);
+    
+    // Centroids in SoA format
+    memoryNeeded += dimensions * k * sizeof(float);
+    
+    // Centroid distances (if using triangle inequality)
+    if (useTriangleInequality) {
+        memoryNeeded += k * k * sizeof(float);
+    }
+    
+    // Assignments
+    memoryNeeded += numPoints * sizeof(int);
+    
+    // Point-centroid distances (if using triangle inequality)
+    if (useTriangleInequality) {
+        memoryNeeded += numPoints * k * sizeof(float);
+    }
+    
+    // Other buffers (counts, changes)
+    memoryNeeded += k * sizeof(int);
+    memoryNeeded += sizeof(int);
+    
+    // Temporary memory for reduction operations (block sums, counts)
+    int threadsPerBlock = 256;
+    int numBlocks = (numPoints + threadsPerBlock - 1) / threadsPerBlock;
+    memoryNeeded += numBlocks * dimensions * k * sizeof(float); // Block sums
+    memoryNeeded += numBlocks * k * sizeof(int); // Block counts
+    
+    // Add some safety margin (20%)
+    memoryNeeded = static_cast<size_t>(memoryNeeded * 1.2);
+    
+    return memoryNeeded;
+}
+
+// Get available GPU memory
+size_t KMeans::getAvailableGPUMemory() {
+    size_t free, total;
+    ::getAvailableGPUMemory(&free, &total);
+    return free;
+}
+
+// Determine batch size based on available memory
+void KMeans::determineBatchSize() {
+    if (batchSize > 0) {
+        // Manual batch size override
+        std::cout << "Using manually specified batch size: " << batchSize << std::endl;
+        return;
+    }
+    
+    if (!useGPU) {
+        // No batching needed for CPU
+        batchSize = 0;
+        return;
+    }
+    
+    size_t availableMemory = getAvailableGPUMemory();
+    size_t totalMemoryNeeded = estimateMemoryRequirements();
+    
+    std::cout << "Memory estimate: " << totalMemoryNeeded / (1024 * 1024) 
+              << " MB needed, " << availableMemory / (1024 * 1024) 
+              << " MB available" << std::endl;
+    
+    if (totalMemoryNeeded <= availableMemory) {
+        // We can process the entire dataset at once
+        std::cout << "Sufficient GPU memory available. Processing entire dataset at once." << std::endl;
+        batchSize = 0; // 0 means use entire dataset
+    } else {
+        // Calculate how many points we can process at once
+        // Base calculation on points' memory usage
+        size_t pointMemory = dimensions * sizeof(float);
+        size_t additionalPerPointMemory = sizeof(int);
+        if (useTriangleInequality) {
+            additionalPerPointMemory += k * sizeof(float);
+        }
+        size_t memoryPerPoint = pointMemory + additionalPerPointMemory;
+        
+        // Reserve memory for non-point data (centroids, etc.)
+        size_t fixedMemory = dimensions * k * sizeof(float) * 2; // Include space for accumulated centroids
+        fixedMemory += k * sizeof(int) * 2; // Include space for accumulated counts
+        if (useTriangleInequality) {
+            fixedMemory += k * k * sizeof(float);
+        }
+        fixedMemory += sizeof(int) * 2; // Changes counter and other misc
+        
+        // Temporary memory for reduction
+        int threadsPerBlock = 256;
+        int estimatedNumBlocks = 1000; // Estimate for a reasonable batch size
+        fixedMemory += estimatedNumBlocks * dimensions * k * sizeof(float); // Block sums
+        fixedMemory += estimatedNumBlocks * k * sizeof(int); // Block counts
+        
+        size_t memoryForPoints = availableMemory * 0.8 - fixedMemory; // Use 80% of available memory
+        int calculatedBatchSize = static_cast<int>(memoryForPoints / memoryPerPoint);
+        
+        // Ensure batch size is reasonable (at least 1000 points, at most the entire dataset)
+        batchSize = std::max(1000, std::min(calculatedBatchSize, static_cast<int>(numPoints)));
+        
+        std::cout << "Using mini-batch processing with batch size: " << batchSize << std::endl;
+    }
 }
 
 // Load data points from CSV file
@@ -257,26 +395,35 @@ bool KMeans::loadCentroidsFromCSV(const std::string& filename, char delimiter) {
     return true;
 }
 
-// Allocate GPU memory - Updated for SoA layout
+// Allocate GPU memory - Updated for SoA layout and mini-batching
 void KMeans::allocateGPUMemory() {
     if (!useGPU) return;
     
     numPoints = points.size();
     dimensions = points[0].features.size();
     
-    // Allocate memory for points in SoA format (dimension-major ordering)
-    cudaMalloc(&d_points_soa, dimensions * numPoints * sizeof(float));
+    // Determine batch size based on available memory
+    determineBatchSize();
     
     // Allocate memory for centroids in SoA format
     cudaMalloc(&d_centroids, dimensions * k * sizeof(float));
     
+    // If using mini-batching, allocate memory for accumulation
+    if (batchSize > 0) {
+        cudaMalloc(&d_accumulated_centroids, dimensions * k * sizeof(float));
+        cudaMalloc(&d_accumulated_counts, k * sizeof(int));
+        
+        // Initialize accumulated centroids and counts to zero
+        cudaMemset(d_accumulated_centroids, 0, dimensions * k * sizeof(float));
+        cudaMemset(d_accumulated_counts, 0, k * sizeof(int));
+    }
+    
     // Allocate memory for centroid distances (if using triangle inequality)
     if (useTriangleInequality) {
         cudaMalloc(&d_centroidDistances, k * k * sizeof(float));
-        cudaMalloc(&d_pointCentroidDists, numPoints * k * sizeof(float));
     }
     
-    // Allocate memory for assignments
+    // Always allocate memory for all assignments
     cudaMalloc(&d_assignments, numPoints * sizeof(int));
     
     // Allocate memory for changes counter
@@ -287,6 +434,25 @@ void KMeans::allocateGPUMemory() {
     
     // Initialize assignments to -1
     cudaMemset(d_assignments, -1, numPoints * sizeof(int));
+    
+    // When using mini-batching, allocate memory for batch processing
+    if (batchSize > 0) {
+        // Allocate memory only for batch of points in SoA format
+        cudaMalloc(&d_points_soa, dimensions * batchSize * sizeof(float));
+        
+        // Allocate memory for point-centroid distances for the batch
+        if (useTriangleInequality) {
+            cudaMalloc(&d_pointCentroidDists, batchSize * k * sizeof(float));
+        }
+    } else {
+        // Allocate memory for all points in SoA format
+        cudaMalloc(&d_points_soa, dimensions * numPoints * sizeof(float));
+        
+        // Allocate memory for point-centroid distances for all points
+        if (useTriangleInequality) {
+            cudaMalloc(&d_pointCentroidDists, numPoints * k * sizeof(float));
+        }
+    }
     
     // Check for CUDA errors
     cudaError_t error = cudaGetLastError();
@@ -299,6 +465,8 @@ void KMeans::allocateGPUMemory() {
 void KMeans::freeGPUMemory() {
     if (d_points_soa) cudaFree(d_points_soa);
     if (d_centroids) cudaFree(d_centroids);
+    if (d_accumulated_centroids) cudaFree(d_accumulated_centroids);
+    if (d_accumulated_counts) cudaFree(d_accumulated_counts);
     if (d_centroidDistances) cudaFree(d_centroidDistances);
     if (d_assignments) cudaFree(d_assignments);
     if (d_changes) cudaFree(d_changes);
@@ -307,6 +475,8 @@ void KMeans::freeGPUMemory() {
     
     d_points_soa = nullptr;
     d_centroids = nullptr;
+    d_accumulated_centroids = nullptr;
+    d_accumulated_counts = nullptr;
     d_centroidDistances = nullptr;
     d_assignments = nullptr;
     d_changes = nullptr;
@@ -322,15 +492,6 @@ void KMeans::copyInitialDataToGPU() {
     std::cout << "Converting data to SoA format for GPU - Points: " << numPoints 
               << ", Dimensions: " << dimensions << ", Clusters: " << k << std::endl;
     
-    // Copy points to device in SoA format
-    std::vector<float> h_points_soa(dimensions * numPoints);
-    for (size_t d = 0; d < dimensions; d++) {
-        for (size_t i = 0; i < numPoints; i++) {
-            h_points_soa[d * numPoints + i] = static_cast<float>(points[i].features[d]);
-        }
-    }
-    cudaMemcpy(d_points_soa, h_points_soa.data(), dimensions * numPoints * sizeof(float), cudaMemcpyHostToDevice);
-    
     // Copy centroids to device in SoA format
     std::vector<float> h_centroids_flat(dimensions * k);
     for (size_t d = 0; d < dimensions; d++) {
@@ -340,19 +501,20 @@ void KMeans::copyInitialDataToGPU() {
     }
     cudaMemcpy(d_centroids, h_centroids_flat.data(), dimensions * k * sizeof(float), cudaMemcpyHostToDevice);
     
-    // If using triangle inequality, copy centroid distances
-    if (useTriangleInequality) {
-        // Calculate centroid distances
-        calculateCentroidDistances();
-        
-        // Copy to device
-        std::vector<float> h_centroid_distances_flat(k * k);
-        for (int i = 0; i < k; i++) {
-            for (int j = 0; j < k; j++) {
-                h_centroid_distances_flat[i * k + j] = static_cast<float>(centroidDistances[i][j]);
+    // If not using mini-batching, copy all points to device now
+    if (batchSize == 0) {
+        std::vector<float> h_points_soa(dimensions * numPoints);
+        for (size_t d = 0; d < dimensions; d++) {
+            for (size_t i = 0; i < numPoints; i++) {
+                h_points_soa[d * numPoints + i] = static_cast<float>(points[i].features[d]);
             }
         }
-        cudaMemcpy(d_centroidDistances, h_centroid_distances_flat.data(), k * k * sizeof(float), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_points_soa, h_points_soa.data(), dimensions * numPoints * sizeof(float), cudaMemcpyHostToDevice);
+    }
+    
+    // If using triangle inequality, calculate centroid distances
+    if (useTriangleInequality) {
+        calculateCentroidDistancesGPU();
     }
     
     // Check for CUDA errors
@@ -360,9 +522,31 @@ void KMeans::copyInitialDataToGPU() {
     if (error != cudaSuccess) {
         std::cerr << "CUDA error in copyInitialDataToGPU: " << cudaGetErrorString(error) << std::endl;
     }
+}
+
+// Copy batch data to GPU for mini-batching
+void KMeans::copyBatchDataToGPU(int startIdx, int currentBatchSize) {
+    if (!useGPU || batchSize == 0) return;
     
-    // Verify data transfer by spot-checking
-    verifyDataTransfer();
+    // Create and copy points for this batch
+    std::vector<float> h_batch_points_soa(dimensions * currentBatchSize);
+    
+    for (size_t d = 0; d < dimensions; d++) {
+        for (int i = 0; i < currentBatchSize; i++) {
+            int globalIdx = startIdx + i;
+            if (globalIdx < numPoints) {
+                h_batch_points_soa[d * currentBatchSize + i] = static_cast<float>(points[globalIdx].features[d]);
+            }
+        }
+    }
+    
+    cudaMemcpy(d_points_soa, h_batch_points_soa.data(), dimensions * currentBatchSize * sizeof(float), cudaMemcpyHostToDevice);
+    
+    // Check for CUDA errors
+    cudaError_t error = cudaGetLastError();
+    if (error != cudaSuccess) {
+        std::cerr << "CUDA error in copyBatchDataToGPU: " << cudaGetErrorString(error) << std::endl;
+    }
 }
 
 // Helper method to verify data transfer to GPU
@@ -371,13 +555,15 @@ void KMeans::verifyDataTransfer() {
     std::vector<float> test_points(dimensions);
     std::vector<float> test_centroids(k);
     
-    // Check first dimension of points
-    cudaMemcpy(test_points.data(), d_points_soa, dimensions * sizeof(float), cudaMemcpyDeviceToHost);
-    std::cout << "Verifying points data transfer (first dimension):" << std::endl;
-    for (int i = 0; i < std::min(5, static_cast<int>(numPoints)); i++) {
-        float device_value = test_points[i];
-        float host_value = static_cast<float>(points[i].features[0]);
-        std::cout << "Point " << i << " dimension 0: Host=" << host_value << ", Device=" << device_value << std::endl;
+    // Check first dimension of points (only if we're not using mini-batching)
+    if (batchSize == 0) {
+        cudaMemcpy(test_points.data(), d_points_soa, dimensions * sizeof(float), cudaMemcpyDeviceToHost);
+        std::cout << "Verifying points data transfer (first dimension):" << std::endl;
+        for (int i = 0; i < std::min(5, static_cast<int>(numPoints)); i++) {
+            float device_value = test_points[i];
+            float host_value = static_cast<float>(points[i].features[0]);
+            std::cout << "Point " << i << " dimension 0: Host=" << host_value << ", Device=" << device_value << std::endl;
+        }
     }
     
     // Check first dimension of centroids
@@ -530,6 +716,12 @@ int KMeans::assignClustersCPUWithTriangleInequality() {
 
 // Assign clusters - GPU version - Updated for SoA layout
 int KMeans::assignClustersGPU() {
+    // If we're using mini-batching, this should never be called directly
+    if (batchSize > 0) {
+        std::cerr << "Error: assignClustersGPU called directly with mini-batching enabled" << std::endl;
+        return 0;
+    }
+    
     // Call CUDA kernel - all processing stays on GPU
     int changes = assignClustersKernel(
         d_points_soa, d_centroids, d_assignments, d_changes,
@@ -547,6 +739,12 @@ int KMeans::assignClustersGPU() {
 
 // Assign clusters - GPU version with triangle inequality - Updated for SoA layout
 int KMeans::assignClustersGPUWithTriangleInequality() {
+    // If we're using mini-batching, this should never be called directly
+    if (batchSize > 0) {
+        std::cerr << "Error: assignClustersGPUWithTriangleInequality called directly with mini-batching enabled" << std::endl;
+        return 0;
+    }
+    
     // Update centroid distances
     calculateCentroidDistancesGPU();
     
@@ -566,13 +764,58 @@ int KMeans::assignClustersGPUWithTriangleInequality() {
     return changes;
 }
 
+// Assign a batch of points to clusters - GPU version
+int KMeans::assignClustersBatchGPU(int startIdx, int currentBatchSize) {
+    // Call CUDA kernel for the batch
+    int changes = assignClustersKernel(
+        d_points_soa, d_centroids, d_assignments, d_changes,
+        currentBatchSize, k, static_cast<int>(dimensions), startIdx
+    );
+    
+    // Check for CUDA errors
+    cudaError_t error = cudaGetLastError();
+    if (error != cudaSuccess) {
+        std::cerr << "CUDA error in assignClustersBatchGPU: " << cudaGetErrorString(error) << std::endl;
+    }
+    
+    return changes;
+}
+
+// Assign a batch of points to clusters - GPU version with triangle inequality
+int KMeans::assignClustersBatchGPUWithTriangleInequality(int startIdx, int currentBatchSize) {
+    // Update centroid distances if needed
+    calculateCentroidDistancesGPU();
+    
+    // Call CUDA kernel for the batch with triangle inequality
+    int changes = assignClustersWithTriangleInequalityKernel(
+        d_points_soa, d_centroids, d_centroidDistances, d_pointCentroidDists,
+        d_assignments, d_changes, currentBatchSize, k, 
+        static_cast<int>(dimensions), startIdx
+    );
+    
+    // Check for CUDA errors
+    cudaError_t error = cudaGetLastError();
+    if (error != cudaSuccess) {
+        std::cerr << "CUDA error in assignClustersBatchGPUWithTriangleInequality: " << cudaGetErrorString(error) << std::endl;
+    }
+    
+    return changes;
+}
+
 // Assign clusters - dispatcher
 int KMeans::assignClusters() {
     if (useGPU) {
-        if (useTriangleInequality) {
-            return assignClustersGPUWithTriangleInequality();
+        if (batchSize > 0) {
+            // When using mini-batching, we don't assign all clusters at once
+            // This is handled by runAlgorithmWithMiniBatching
+            std::cerr << "Error: assignClusters called directly with mini-batching enabled" << std::endl;
+            return 0;
         } else {
-            return assignClustersGPU();
+            if (useTriangleInequality) {
+                return assignClustersGPUWithTriangleInequality();
+            } else {
+                return assignClustersGPU();
+            }
         }
     } else {
         if (useTriangleInequality) {
@@ -580,6 +823,21 @@ int KMeans::assignClusters() {
         } else {
             return assignClustersCPU();
         }
+    }
+}
+
+// Assign a batch of points to clusters - dispatcher
+int KMeans::assignClustersBatch(int startIdx, int currentBatchSize) {
+    if (useGPU) {
+        if (useTriangleInequality) {
+            return assignClustersBatchGPUWithTriangleInequality(startIdx, currentBatchSize);
+        } else {
+            return assignClustersBatchGPU(startIdx, currentBatchSize);
+        }
+    } else {
+        // CPU version - not implemented as it doesn't need batching
+        std::cerr << "Error: CPU version does not support batch processing" << std::endl;
+        return 0;
     }
 }
 
@@ -630,6 +888,12 @@ void KMeans::updateCentroidsCPU() {
 
 // Update centroids - GPU version - Updated for SoA layout and using two-step reduction
 void KMeans::updateCentroidsGPU() {
+    // If we're using mini-batching, this should never be called directly
+    if (batchSize > 0) {
+        std::cerr << "Error: updateCentroidsGPU called directly with mini-batching enabled" << std::endl;
+        return;
+    }
+    
     // Call CUDA kernel with two-step reduction
     updateCentroidsKernel(
         d_points_soa, d_centroids, d_assignments, d_counts,
@@ -648,10 +912,49 @@ void KMeans::updateCentroidsGPU() {
     }
 }
 
+// Update centroids for a batch - GPU version
+void KMeans::updateCentroidsBatchGPU(int startIdx, int currentBatchSize) {
+    // We need a temporary buffer for batch centroids
+    float* d_batch_centroids = nullptr;
+    int* d_batch_counts = nullptr;
+    
+    // Allocate memory for batch centroids and counts
+    cudaMalloc(&d_batch_centroids, dimensions * k * sizeof(float));
+    cudaMalloc(&d_batch_counts, k * sizeof(int));
+    
+    // Call CUDA kernel to calculate batch centroids
+    updateCentroidsKernel(
+        d_points_soa, d_batch_centroids, d_assignments, d_batch_counts,
+        currentBatchSize, k, static_cast<int>(dimensions), startIdx
+    );
+    
+    // Accumulate batch centroids into accumulated centroids
+    accumulateBatchCentroidsKernel(
+        d_batch_centroids, d_batch_counts, d_accumulated_centroids, d_accumulated_counts,
+        k, static_cast<int>(dimensions)
+    );
+    
+    // Free temporary memory
+    cudaFree(d_batch_centroids);
+    cudaFree(d_batch_counts);
+    
+    // Check for CUDA errors
+    cudaError_t error = cudaGetLastError();
+    if (error != cudaSuccess) {
+        std::cerr << "CUDA error in updateCentroidsBatchGPU: " << cudaGetErrorString(error) << std::endl;
+    }
+}
+
 // Update centroids - dispatcher
 void KMeans::updateCentroids() {
     if (useGPU) {
-        updateCentroidsGPU();
+        if (batchSize > 0) {
+            // When using mini-batching, we don't update all centroids at once
+            // This is handled by runAlgorithmWithMiniBatching
+            std::cerr << "Error: updateCentroids called directly with mini-batching enabled" << std::endl;
+        } else {
+            updateCentroidsGPU();
+        }
     } else {
         updateCentroidsCPU();
     }
@@ -700,6 +1003,70 @@ void KMeans::prepareGPUMemory() {
     copyInitialDataToGPU();
 }
 
+// Run the k-means algorithm with mini-batching
+void KMeans::runAlgorithmWithMiniBatching() {
+    if (!useGPU || batchSize <= 0) {
+        std::cerr << "Error: Mini-batching requires GPU and batch size > 0" << std::endl;
+        return;
+    }
+    
+    int numBatches = (numPoints + batchSize - 1) / batchSize;
+    std::cout << "Running K-means with mini-batching (" << numBatches << " batches)" << std::endl;
+    
+    int iterations = 0;
+    int totalChanges;
+    
+    do {
+        totalChanges = 0;
+        
+        // Reset accumulated centroids and counts
+        cudaMemset(d_accumulated_centroids, 0, dimensions * k * sizeof(float));
+        cudaMemset(d_accumulated_counts, 0, k * sizeof(int));
+        
+        // Process each batch
+        for (int b = 0; b < numBatches; b++) {
+            int startIdx = b * batchSize;
+            int endIdx = std::min((b + 1) * batchSize, static_cast<int>(numPoints));
+            int currentBatchSize = endIdx - startIdx;
+            
+            // Copy current batch to GPU
+            copyBatchDataToGPU(startIdx, currentBatchSize);
+            
+            // Assign clusters for this batch
+            int batchChanges = assignClustersBatch(startIdx, currentBatchSize);
+            totalChanges += batchChanges;
+            
+            // Accumulate centroids from this batch
+            updateCentroidsBatchGPU(startIdx, currentBatchSize);
+        }
+        
+        // Finalize centroids by dividing by counts
+        int maxThreads = 32; // Adjust based on GPU capability
+        int blockSizeX = std::min(maxThreads, static_cast<int>(dimensions));
+        int blockSizeY = std::min(maxThreads, k);
+        int gridSizeX = (dimensions + blockSizeX - 1) / blockSizeX;
+        int gridSizeY = (k + blockSizeY - 1) / blockSizeY;
+        
+        // Call finalization kernel through the wrapper function
+        finalizeCentroidsKernel(
+            d_centroids, d_accumulated_counts, k, static_cast<int>(dimensions),
+            gridSizeX, gridSizeY, blockSizeX, blockSizeY
+        );
+        
+        // If using triangle inequality, update centroid distances
+        if (useTriangleInequality) {
+            calculateCentroidDistancesGPU();
+        }
+        
+        iterations++;
+        
+        std::cout << "Iteration " << iterations << ": " << totalChanges << " points changed clusters" << std::endl;
+        
+    } while (totalChanges > 0 && iterations < maxIterations);
+    
+    std::cout << "K-means with mini-batching converged after " << iterations << " iterations." << std::endl;
+}
+
 // Run the k-means algorithm iterations
 void KMeans::runAlgorithm() {
     if (points.empty()) {
@@ -715,6 +1082,12 @@ void KMeans::runAlgorithm() {
     
     if (centroids.empty()) {
         std::cerr << "Error: Centroids not initialized. Please load centroids before running." << std::endl;
+        return;
+    }
+    
+    // Check if we should use mini-batching
+    if (useGPU && batchSize > 0) {
+        runAlgorithmWithMiniBatching();
         return;
     }
     
@@ -816,6 +1189,11 @@ const std::vector<std::vector<double>>& KMeans::getCentroids() const {
 double KMeans::calculateSSE() const {
     double sse = 0.0;
     for (const auto& point : points) {
+        // Skip points with invalid cluster assignments
+        if (point.cluster < 0 || point.cluster >= k) {
+            continue;
+        }
+        
         // For SSE, we need the squared distance
         double dist = 0.0;
         for (size_t i = 0; i < point.features.size(); i++) {
@@ -892,7 +1270,9 @@ void KMeans::warmupKernels() {
     
     // Save current state
     std::vector<int> savedAssignments(numPoints);
-    cudaMemcpy(savedAssignments.data(), d_assignments, numPoints * sizeof(int), cudaMemcpyDeviceToHost);
+    if (batchSize == 0) {
+        cudaMemcpy(savedAssignments.data(), d_assignments, numPoints * sizeof(int), cudaMemcpyDeviceToHost);
+    }
     
     // Create temporary buffers for warmup to avoid modifying the actual data
     int* temp_assignments = nullptr;
@@ -900,19 +1280,20 @@ void KMeans::warmupKernels() {
     float* temp_centroids = nullptr;
     
     // Allocate temporary memory
-    cudaMalloc(&temp_assignments, numPoints * sizeof(int));
+    int warmupSize = std::min(10000, static_cast<int>(numPoints));
+    cudaMalloc(&temp_assignments, warmupSize * sizeof(int));
     cudaMalloc(&temp_changes, sizeof(int));
     cudaMalloc(&temp_centroids, dimensions * k * sizeof(float));
     
     // Copy current data to temps
-    cudaMemcpy(temp_assignments, d_assignments, numPoints * sizeof(int), cudaMemcpyDeviceToDevice);
+    cudaMemset(temp_assignments, -1, warmupSize * sizeof(int));
     cudaMemcpy(temp_centroids, d_centroids, dimensions * k * sizeof(float), cudaMemcpyDeviceToDevice);
     
     // Call the appropriate warmup functions with temporary buffers
     // Warm up assign clusters kernel
     assignClustersKernel(
         d_points_soa, temp_centroids, temp_assignments, temp_changes,
-        static_cast<int>(numPoints), k, static_cast<int>(dimensions)
+        warmupSize, k, static_cast<int>(dimensions)
     );
     
     // Warm up update centroids kernel with temporary buffers
@@ -921,7 +1302,7 @@ void KMeans::warmupKernels() {
     
     updateCentroidsKernel(
         d_points_soa, temp_centroids, temp_assignments, temp_counts,
-        static_cast<int>(numPoints), k, static_cast<int>(dimensions)
+        warmupSize, k, static_cast<int>(dimensions)
     );
     
     // Additional warmup for triangle inequality if enabled
@@ -930,7 +1311,7 @@ void KMeans::warmupKernels() {
         float* temp_point_centroid_dists = nullptr;
         
         cudaMalloc(&temp_centroid_distances, k * k * sizeof(float));
-        cudaMalloc(&temp_point_centroid_dists, numPoints * k * sizeof(float));
+        cudaMalloc(&temp_point_centroid_dists, warmupSize * k * sizeof(float));
         
         // Warm up centroid distances calculation
         calculateCentroidDistancesKernel(
@@ -940,13 +1321,32 @@ void KMeans::warmupKernels() {
         // Warm up triangle inequality assignment kernel
         assignClustersWithTriangleInequalityKernel(
             d_points_soa, temp_centroids, temp_centroid_distances, temp_point_centroid_dists,
-            temp_assignments, temp_changes, static_cast<int>(numPoints), k,
+            temp_assignments, temp_changes, warmupSize, k,
             static_cast<int>(dimensions)
         );
         
         // Free temporary memory
         cudaFree(temp_centroid_distances);
         cudaFree(temp_point_centroid_dists);
+    }
+    
+    // Warm up batch-specific kernels if using mini-batching
+    if (batchSize > 0) {
+        float* temp_accumulated_centroids = nullptr;
+        int* temp_accumulated_counts = nullptr;
+        
+        cudaMalloc(&temp_accumulated_centroids, dimensions * k * sizeof(float));
+        cudaMalloc(&temp_accumulated_counts, k * sizeof(int));
+        
+        // Warm up batch accumulation
+        accumulateBatchCentroidsKernel(
+            temp_centroids, temp_counts, temp_accumulated_centroids, temp_accumulated_counts,
+            k, static_cast<int>(dimensions)
+        );
+        
+        // Free temporary memory
+        cudaFree(temp_accumulated_centroids);
+        cudaFree(temp_accumulated_counts);
     }
     
     // Synchronize device to ensure all warmup kernels have completed
@@ -959,7 +1359,9 @@ void KMeans::warmupKernels() {
     cudaFree(temp_counts);
     
     // Restore original assignments - important for correctness!
-    cudaMemcpy(d_assignments, savedAssignments.data(), numPoints * sizeof(int), cudaMemcpyHostToDevice);
+    if (batchSize == 0) {
+        cudaMemcpy(d_assignments, savedAssignments.data(), numPoints * sizeof(int), cudaMemcpyHostToDevice);
+    }
     
     // Make sure all operations are complete
     cudaDeviceSynchronize();

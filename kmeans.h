@@ -14,6 +14,7 @@
 // Class for K-means clustering implementation using Lloyd's algorithm
 // Optimized to keep data on GPU throughout the entire algorithm
 // Using Structure of Arrays (SoA) layout for better memory coalescing
+// Added support for mini-batching to handle large cluster counts
 class KMeans {
 private:
     int k;              // Number of clusters
@@ -21,6 +22,7 @@ private:
     double epsilon;     // Convergence threshold
     bool useGPU;        // Flag to indicate if GPU should be used
     bool useTriangleInequality; // Flag to use triangle inequality optimization
+    int batchSize;      // Size of mini-batches (0 means use entire dataset)
 
     // Helper struct for a point in N-dimensional space (for CPU implementation)
     struct Point {
@@ -46,6 +48,10 @@ private:
     size_t dimensions;     // Number of dimensions for points
     size_t numPoints;      // Number of points
 
+    // Mini-batch specific members
+    float* d_accumulated_centroids; // Accumulated centroids across mini-batches
+    int* d_accumulated_counts;      // Accumulated counts across mini-batches
+    
     // Calculate Euclidean distance between two points (CPU version)
     double distance(const std::vector<double>& a, const std::vector<double>& b) const;
 
@@ -67,14 +73,26 @@ private:
     // Assign each point to nearest centroid - GPU version with triangle inequality
     int assignClustersGPUWithTriangleInequality();
     
+    // Assign batches of points to clusters - GPU version
+    int assignClustersBatchGPU(int startIdx, int batchSize);
+    
+    // Assign batches of points to clusters - GPU version with triangle inequality
+    int assignClustersBatchGPUWithTriangleInequality(int startIdx, int batchSize);
+    
     // Combined function that calls either CPU or GPU version
     int assignClusters();
+    
+    // Assign a batch of points to clusters
+    int assignClustersBatch(int startIdx, int batchSize);
 
     // Update centroids based on current cluster assignments - CPU version
     void updateCentroidsCPU();
     
     // Update centroids based on current cluster assignments - GPU version
     void updateCentroidsGPU();
+    
+    // Update centroids based on a batch of points - GPU version
+    void updateCentroidsBatchGPU(int startIdx, int batchSize);
     
     // Combined function that calls either CPU or GPU version
     void updateCentroids();
@@ -88,6 +106,9 @@ private:
     // Copy initial data to GPU (called once)
     void copyInitialDataToGPU();
     
+    // Copy batch data to GPU
+    void copyBatchDataToGPU(int startIdx, int batchSize);
+    
     // Copy results from GPU (called once at the end)
     void copyFinalResultsFromGPU();
     
@@ -97,9 +118,14 @@ private:
     
     // Warmup functions for GPU kernels
     void warmupGPUKernels();
-    void warmupAssignClustersKernel();
-    void warmupUpdateCentroidsKernel();
-    void warmupTriangleInequalityKernels();
+    
+    // Memory estimation functions
+    size_t estimateMemoryRequirements();
+    size_t getAvailableGPUMemory();
+    void determineBatchSize();
+    
+    // Run algorithm with mini-batching
+    void runAlgorithmWithMiniBatching();
 
 public:
     KMeans(int numClusters, int maxIter = 100, double eps = 1e-4, bool gpu = false, bool useTriangle = false);
@@ -149,6 +175,9 @@ public:
     
     // Enable or disable triangle inequality optimization
     void setUseTriangleInequality(bool use);
+    
+    // Set batch size manually (0 = auto)
+    void setBatchSize(int size);
     
     // Check if CUDA is available
     static bool isCUDAAvailable();

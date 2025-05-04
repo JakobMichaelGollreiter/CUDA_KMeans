@@ -24,14 +24,15 @@ void makeDirectory(const std::string& dir) {
 
 int main(int argc, char* argv[]) {
     // Check command line arguments
-    if (argc < 3 || argc > 7) {
-        std::cerr << "Usage: " << argv[0] << " <data_file.csv> <centroids_file.csv> <num_clusters> [max_iterations] [use_gpu] [use_triangle]" << std::endl;
+    if (argc < 3 || argc > 8) {
+        std::cerr << "Usage: " << argv[0] << " <data_file.csv> <centroids_file.csv> <num_clusters> [max_iterations] [use_gpu] [use_triangle] [batch_size]" << std::endl;
         std::cerr << "  <data_file.csv>     : Path to CSV file containing data points" << std::endl;
         std::cerr << "  <centroids_file.csv>: Path to CSV file containing initial centroids" << std::endl;
         std::cerr << "  <num_clusters>      : Number of clusters (k)" << std::endl;
         std::cerr << "  [max_iterations]    : Maximum iterations (default: 100)" << std::endl;
         std::cerr << "  [use_gpu]           : Use GPU acceleration if available (0 or 1, default: 0)" << std::endl;
         std::cerr << "  [use_triangle]      : Use Triangle Inequality optimization (0 or 1, default: 0)" << std::endl;
+        std::cerr << "  [batch_size]        : Mini-batch size for large datasets (0=auto, default: 0)" << std::endl;
         return 1;
     }
     
@@ -87,6 +88,20 @@ int main(int argc, char* argv[]) {
             }
         }
         
+        // Optional argument for batch size
+        int batchSize = 0;  // Default value (0 = auto)
+        if (argc >= 8) {
+            try {
+                batchSize = std::stoi(argv[7]);
+                if (batchSize < 0) {
+                    std::cerr << "Error: Batch size must be non-negative. Using default: 0 (auto)" << std::endl;
+                    batchSize = 0;
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "Error: Invalid batch size. Using default: 0 (auto)" << std::endl;
+            }
+        }
+        
         // Check if CUDA is available if GPU requested
         if (useGPU && !KMeans::isCUDAAvailable()) {
             std::cerr << "Warning: CUDA is not available on this system. Falling back to CPU implementation." << std::endl;
@@ -95,6 +110,11 @@ int main(int argc, char* argv[]) {
         
         // Create a KMeans instance
         KMeans kmeans(numClusters, maxIterations, 1e-4, useGPU, useTriangleInequality);
+        
+        // Set batch size if specified
+        if (batchSize > 0) {
+            kmeans.setBatchSize(batchSize);
+        }
         
         // Load data points from CSV file
         std::cout << "Loading data points from " << dataFile << "..." << std::endl;
@@ -152,7 +172,9 @@ int main(int argc, char* argv[]) {
         // Count points in each cluster
         std::vector<int> clusterCounts(numClusters, 0);
         for (int cluster : assignments) {
-            clusterCounts[cluster]++;
+            if (cluster >= 0 && cluster < numClusters) {
+                clusterCounts[cluster]++;
+            }
         }
         
         // Print cluster statistics

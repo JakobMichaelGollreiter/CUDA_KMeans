@@ -147,13 +147,13 @@ public:
     void run();
     
     // NEW: Prepare GPU memory (allocate and transfer) - called before timing
-    void prepareGPUMemory();
+    double prepareGPUMemory();
     
     // NEW: Run just the algorithm (Lloyd's iterations) - this is timed
     void runAlgorithm();
     
     // NEW: Retrieve results from GPU - called after timing
-    void retrieveResultsFromGPU();
+    double retrieveResultsFromGPU();
     
     // Get cluster assignments
     std::vector<int> getClusterAssignments() const;

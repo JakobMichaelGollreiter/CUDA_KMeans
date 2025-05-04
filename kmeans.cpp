@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cuda_runtime.h>
+#include <chrono>
 
 // External functions from CUDA
 extern "C" int assignClustersKernel(
@@ -961,23 +962,23 @@ void KMeans::updateCentroids() {
 }
 
 // Prepare GPU memory (allocate and transfer) - Updated for SoA layout
-void KMeans::prepareGPUMemory() {
-    if (!useGPU) return;
+double KMeans::prepareGPUMemory() {
+    if (!useGPU) return 0.0;
     
     if (points.empty()) {
         std::cerr << "Error: No data points loaded" << std::endl;
-        return;
+        return 0.0;
     }
     
     if (points.size() < static_cast<size_t>(k)) {
         std::cerr << "Error: Number of points (" << points.size() 
                   << ") must be at least equal to k (" << k << ")" << std::endl;
-        return;
+        return 0.0;
     }
     
     if (centroids.empty()) {
         std::cerr << "Error: Centroids not initialized. Please load centroids before running." << std::endl;
-        return;
+        return 0.0;
     }
     
     // Validate dimensions match
@@ -986,7 +987,7 @@ void KMeans::prepareGPUMemory() {
         if (centroid.size() != dim) {
             std::cerr << "Error: Dimension mismatch between data points (" 
                       << dim << ") and centroids" << std::endl;
-            return;
+            return 0.0;
         }
     }
     
@@ -996,11 +997,19 @@ void KMeans::prepareGPUMemory() {
         std::cout << "Using Triangle Inequality optimization" << std::endl;
     }
     
+    // Start timing
+    std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
+    
     // Allocate GPU memory
     allocateGPUMemory();
     
     // Copy data to GPU
     copyInitialDataToGPU();
+        
+    // End timing
+    std::chrono::high_resolution_clock::time_point end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> elapsed = end - start;
+    return elapsed.count(); // Return time in seconds
 }
 
 // Run the k-means algorithm with mini-batching
@@ -1140,16 +1149,21 @@ void KMeans::verifyAssignments(int iteration) {
 }
 
 // Retrieve results from GPU
-void KMeans::retrieveResultsFromGPU() {
-    if (!useGPU) return;
+double KMeans::retrieveResultsFromGPU() {
+    if (!useGPU) return 0.0;
+    std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
     
     // Copy results back from GPU
     copyFinalResultsFromGPU();
     
     // Free GPU memory
     freeGPUMemory();
+        
+    // End timing
+    std::chrono::high_resolution_clock::time_point end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> elapsed = end - start;
+    return elapsed.count(); // Return time in seconds
 }
-
 // Run the k-means algorithm - calls the separate stages
 void KMeans::run() {
     // If using GPU, prepare memory

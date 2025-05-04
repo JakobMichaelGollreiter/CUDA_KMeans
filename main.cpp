@@ -130,15 +130,16 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         
-        // Separate data loading and GPU memory preparation from algorithm timing
+        std::chrono::duration<double> load_to_gpu_time;
+        std::chrono::duration<double> load_from_gpu_time;
         if (useGPU) {
+            // Separate data loading and GPU memory preparation from algorithm timing
             std::cout << "\nPreparing GPU memory (not included in timing)..." << std::endl;
-            kmeans.prepareGPUMemory();
-            
+            load_to_gpu_time = std::chrono::duration<double>(kmeans.prepareGPUMemory());
+
             // NEW: Warm up GPU kernels before timing
             kmeans.warmupKernels();
         }
-        
         // Run the clustering algorithm with timing only the algorithm, not data transfers
         std::cout << "\nRunning K-means clustering..." << std::endl;
         std::cout << (useGPU ? "Using GPU acceleration" : "Using CPU implementation") << std::endl;
@@ -152,16 +153,19 @@ int main(int argc, char* argv[]) {
 
         // End timing
         auto end = std::chrono::high_resolution_clock::now();
-
-        // If using GPU, copy results back (not included in timing)
+        
         if (useGPU) {
+            // If using GPU, copy results back (not included in timing)
             std::cout << "Copying results from GPU (not included in timing)..." << std::endl;
-            kmeans.retrieveResultsFromGPU();
+            
+            load_from_gpu_time = std::chrono::duration<double>(kmeans.retrieveResultsFromGPU());
         }
 
         // Calculate and display the algorithm duration only
         std::chrono::duration<double> elapsed = end - start;
-        std::cout << "\nAlgorithm time (excluding transfers): " << elapsed.count() << " seconds" << std::endl;
+        std::chrono::duration<double> elapsed_with_loading = end - start + load_to_gpu_time + load_from_gpu_time;
+        std::cout << "\nAlgorithm time (including gpu loading transfers): " << elapsed.count() << " seconds" << std::endl;
+        std::cout << "\nAlgorithm time (including gpu loading transfers): " << elapsed_with_loading.count() << " seconds" << std::endl;
         std::cout << "Clustering completed." << std::endl;
         std::cout << "------------------------" << std::endl;
 
@@ -177,31 +181,31 @@ int main(int argc, char* argv[]) {
             }
         }
         
-        // Print cluster statistics
-        std::cout << "\nCluster point counts:" << std::endl;
-        std::cout << "---------------------" << std::endl;
-        for (int i = 0; i < numClusters; i++) {
-            std::cout << "Cluster " << i << ": " << clusterCounts[i] << " points" << std::endl;
-        }
+        // // Print cluster statistics
+        // std::cout << "\nCluster point counts:" << std::endl;
+        // std::cout << "---------------------" << std::endl;
+        // for (int i = 0; i < numClusters; i++) {
+        //     std::cout << "Cluster " << i << ": " << clusterCounts[i] << " points" << std::endl;
+        // }
         
         std::cout << "\nSum of Squared Errors (SSE): " << kmeans.calculateSSE() << std::endl;
         
-        // Extract filename
-        std::string filename = getFilenameStem(dataFile);
+        // // Extract filename
+        // std::string filename = getFilenameStem(dataFile);
 
-        // Create output directories
-        std::string clusteOutputDir = "../label_predictions";
-        std::string centroidsOutputDir = "../center_predictions";
+        // // Create output directories
+        // std::string clusteOutputDir = "../label_predictions";
+        // std::string centroidsOutputDir = "../center_predictions";
 
-        makeDirectory(clusteOutputDir);
-        makeDirectory(centroidsOutputDir);
+        // makeDirectory(clusteOutputDir);
+        // makeDirectory(centroidsOutputDir);
 
-        // Construct file paths
-        std::string outputClustersFile = clusteOutputDir + "/" + filename + "_labels.csv";
-        std::string outputCentroidsFile = centroidsOutputDir + "/" + filename + "_centers.csv";
+        // // Construct file paths
+        // std::string outputClustersFile = clusteOutputDir + "/" + filename + "_labels.csv";
+        // std::string outputCentroidsFile = centroidsOutputDir + "/" + filename + "_centers.csv";
 
-        kmeans.saveClusterAssignmentsToCSV(outputClustersFile);
-        kmeans.saveCentroidsToCSV(outputCentroidsFile);
+        // kmeans.saveClusterAssignmentsToCSV(outputClustersFile);
+        // kmeans.saveCentroidsToCSV(outputCentroidsFile);
             
         return 0;
     } catch (const std::exception& e) {

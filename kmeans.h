@@ -127,7 +127,7 @@ public:
     void runAlgorithm();
     
     // NEW: Retrieve results from GPU - called after timing
-    void retrieveResultsFromGPU();
+    double retrieveResultsFromGPU();
     
     // Get cluster assignments
     std::vector<int> getClusterAssignments() const;

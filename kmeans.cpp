@@ -694,12 +694,12 @@ double KMeans::prepareGPUMemory() {
         std::cout << "Using Triangle Inequality optimization" << std::endl;
     }
     
+    // Start timing
+    std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
+    
     // Allocate GPU memory
     allocateGPUMemory();
     
-    // Start timing
-    std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
-
     // Copy data to GPU
     copyInitialDataToGPU();
         
@@ -776,14 +776,20 @@ void KMeans::verifyAssignments(int iteration) {
 }
 
 // Retrieve results from GPU
-void KMeans::retrieveResultsFromGPU() {
-    if (!useGPU) return;
+double KMeans::retrieveResultsFromGPU() {
+    if (!useGPU) return 0.0;
+    std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
     
     // Copy results back from GPU
     copyFinalResultsFromGPU();
     
     // Free GPU memory
     freeGPUMemory();
+        
+    // End timing
+    std::chrono::high_resolution_clock::time_point end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> elapsed = end - start;
+    return elapsed.count(); // Return time in seconds
 }
 
 // Run the k-means algorithm - calls the separate stages

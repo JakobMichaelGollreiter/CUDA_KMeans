@@ -110,6 +110,7 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         std::chrono::duration<double> load_to_gpu_time;
+        std::chrono::duration<double> load_from_gpu_time;
         if (useGPU) {
             // Separate data loading and GPU memory preparation from algorithm timing
             std::cout << "\nPreparing GPU memory (not included in timing)..." << std::endl;
@@ -135,12 +136,13 @@ int main(int argc, char* argv[]) {
         if (useGPU) {
             // If using GPU, copy results back (not included in timing)
             std::cout << "Copying results from GPU (not included in timing)..." << std::endl;
-            kmeans.retrieveResultsFromGPU();
+            
+            load_from_gpu_time = std::chrono::duration<double>(kmeans.retrieveResultsFromGPU());
         }
 
         // Calculate and display the algorithm duration only
         std::chrono::duration<double> elapsed = end - start;
-        std::chrono::duration<double> elapsed_with_loading = end - start + load_to_gpu_time;
+        std::chrono::duration<double> elapsed_with_loading = end - start + load_to_gpu_time + load_from_gpu_time;
         std::cout << "\nAlgorithm time (including gpu loading transfers): " << elapsed.count() << " seconds" << std::endl;
         std::cout << "\nAlgorithm time (including gpu loading transfers): " << elapsed_with_loading.count() << " seconds" << std::endl;
         std::cout << "Clustering completed." << std::endl;

@@ -140,31 +140,31 @@ int main(int argc, char* argv[]) {
             clusterCounts[cluster]++;
         }
         
-        // Print cluster statistics
-        std::cout << "\nCluster point counts:" << std::endl;
-        std::cout << "---------------------" << std::endl;
-        for (int i = 0; i < numClusters; i++) {
-            std::cout << "Cluster " << i << ": " << clusterCounts[i] << " points" << std::endl;
-        }
+        // // Print cluster statistics
+        // std::cout << "\nCluster point counts:" << std::endl;
+        // std::cout << "---------------------" << std::endl;
+        // for (int i = 0; i < numClusters; i++) {
+        //     std::cout << "Cluster " << i << ": " << clusterCounts[i] << " points" << std::endl;
+        // }
         
         std::cout << "\nSum of Squared Errors (SSE): " << kmeans.calculateSSE() << std::endl;
         
-        // Extract filename
-        std::string filename = getFilenameStem(dataFile);
+        // // Extract filename
+        // std::string filename = getFilenameStem(dataFile);
 
-        // Create output directories
-        std::string clusteOutputDir = "../label_predictions";
-        std::string centroidsOutputDir = "../center_predictions";
+        // // Create output directories
+        // std::string clusteOutputDir = "../label_predictions";
+        // std::string centroidsOutputDir = "../center_predictions";
 
-        makeDirectory(clusteOutputDir);
-        makeDirectory(centroidsOutputDir);
+        // makeDirectory(clusteOutputDir);
+        // makeDirectory(centroidsOutputDir);
 
-        // Construct file paths
-        std::string outputClustersFile =  clusteOutputDir + "/" + filename + "_labels.csv";
-        std::string outputCentroidsFile =  centroidsOutputDir + "/" + filename + "_centers.csv";
+        // // Construct file paths
+        // std::string outputClustersFile =  clusteOutputDir + "/" + filename + "_labels.csv";
+        // std::string outputCentroidsFile =  centroidsOutputDir + "/" + filename + "_centers.csv";
 
-        kmeans.saveClusterAssignmentsToCSV(outputClustersFile);
-        kmeans.saveCentroidsToCSV(outputCentroidsFile);
+        // kmeans.saveClusterAssignmentsToCSV(outputClustersFile);
+        // kmeans.saveCentroidsToCSV(outputCentroidsFile);
             
         return 0;
     } catch (const std::exception& e) {

@@ -2,8 +2,8 @@
 
 # Configuration
 KMEANS_EXECUTABLE="./kmeans"
-DATASET_DIR="../kmeans_datasets_csv"
-INIT_DIR="../kmeans_inits"
+DATASET_DIR="../datasets_1000_clusters"
+INIT_DIR="../datasets_1000_clusters_init"
 OUTPUT_FILE="kmeans_performance_summary.txt"
 MAX_ITERATIONS=20
 USE_GPU=1          # Set to 1 to use GPU acceleration

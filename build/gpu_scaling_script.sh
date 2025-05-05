@@ -2,8 +2,8 @@
 
 # Configuration
 KMEANS_EXECUTABLE="./kmeans"
-DATASET_DIR="../datasets_1000_clusters"
-INIT_DIR="../datasets_1000_clusters_init"
+DATASET_DIR="../kmeans_dataset_5MIO"
+INIT_DIR="../kmeans_inits"
 OUTPUT_FILE="kmeans_performance_summary.txt"
 MAX_ITERATIONS=20
 USE_GPU=1          # Set to 1 to use GPU acceleration
@@ -39,7 +39,7 @@ fi
 # Create/overwrite output file with header
 echo "# KMeans Performance Summary" > "$OUTPUT_FILE"
 echo "# Generated on $(date)" >> "$OUTPUT_FILE"
-echo "# Format: Filename | Dimensions | Num Clusters | Num Points | Elapsed Time (s) | Iterations" >> "$OUTPUT_FILE"
+echo "# Format: Filename | Dimensions | Num Clusters | Num Points | Algorithm Time (s) | Algorithm Time with GPU Loading (s) | Iterations" >> "$OUTPUT_FILE"
 echo "----------------------------------------------------------------------------------" >> "$OUTPUT_FILE"
 
 # Find all dataset files
@@ -110,32 +110,28 @@ for dataset_file in $dataset_files; do
         continue
     fi
     
-    # Extract elapsed time from output - look for "Algorithm time" instead of "Elapsed time"
-    elapsed_time=$(echo "$output" | grep "Algorithm time" | awk '{print $4}')
+    # Extract algorithm time without GPU loading
+    algo_time=$(echo "$output" | grep -E "^Algorithm time: " | awk '{print $3}')
     
-    # Extract iterations - look for iterations completed
-    iterations=$(echo "$output" | grep "Total loop count" | awk '{print $NF}')
+    # Extract algorithm time with GPU loading
+    algo_time_with_loading=$(echo "$output" | grep "including gpu loading transfers" | awk '{print $7}')
     
-    if [ -z "$elapsed_time" ]; then
-        # Fallback to old format if "Algorithm time" not found
-        elapsed_time=$(echo "$output" | grep "Elapsed time:" | awk '{print $3}')
-        
-        if [ -z "$elapsed_time" ]; then
-            echo "Warning: Could not extract elapsed time from output"
-            echo "Output:"
-            echo "$output"
-            continue
-        fi
+    # For iterations, since we don't have it in the output, use max iterations
+    iterations="$MAX_ITERATIONS"
+    
+    if [ -z "$algo_time" ]; then
+        echo "Warning: Could not extract algorithm time from output"
+        algo_time="N/A"
     fi
     
-    if [ -z "$iterations" ]; then
-        echo "Warning: Could not extract iterations from output, using maximum"
-        iterations="$MAX_ITERATIONS"
+    if [ -z "$algo_time_with_loading" ]; then
+        echo "Warning: Could not extract algorithm time with GPU loading from output"
+        algo_time_with_loading="N/A"
     fi
     
     # Write results to output file
-    echo "$filename | $dimensions | $num_clusters | $num_points | $elapsed_time | $iterations" >> "$OUTPUT_FILE"
-    echo "Completed: Time = $elapsed_time s, Iterations = $iterations"
+    echo "$filename | $dimensions | $num_clusters | $num_points | $algo_time | $algo_time_with_loading | $iterations" >> "$OUTPUT_FILE"
+    echo "Completed: Algorithm Time = $algo_time s, With GPU Loading = $algo_time_with_loading s, Iterations = $iterations"
     echo "---------------------------------------------"
 done
 

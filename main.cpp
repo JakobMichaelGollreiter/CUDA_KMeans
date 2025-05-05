@@ -164,7 +164,7 @@ int main(int argc, char* argv[]) {
         // Calculate and display the algorithm duration only
         std::chrono::duration<double> elapsed = end - start;
         std::chrono::duration<double> elapsed_with_loading = end - start + load_to_gpu_time + load_from_gpu_time;
-        std::cout << "\nAlgorithm time (including gpu loading transfers): " << elapsed.count() << " seconds" << std::endl;
+        std::cout << "\nAlgorithm time: " << elapsed.count() << " seconds" << std::endl;
         std::cout << "\nAlgorithm time (including gpu loading transfers): " << elapsed_with_loading.count() << " seconds" << std::endl;
         std::cout << "Clustering completed." << std::endl;
         std::cout << "------------------------" << std::endl;

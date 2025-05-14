@@ -1,26 +1,23 @@
 #!/bin/bash
 
 # Configuration
-KMEANS_EXECUTABLE="./kmeans"
-DATASET_DIR="../datasets_100_clusters"
-INIT_DIR="../datasets_100_clusters_init"
-OUTPUT_FILE="kmeans_performance_summary.txt"
+PYTHON_EXECUTABLE="python"
+KMEANS_SCRIPT="scikit_kmeans.py"  # No ./ prefix since we're one directory higher
+DATASET_DIR="datasets_100_clusters"  # Removed ../ prefix
+INIT_DIR="datasets_100_clusters_init"  # Removed ../ prefix
+OUTPUT_FILE="kmeans_scikit_performance_summary.txt"
 MAX_ITERATIONS=20
-USE_GPU=1          # Set to 1 to use GPU acceleration
-USE_TRIANGLE=1     # Set to 1 to use Triangle Inequality optimization
 
-echo "=== KMeans Performance Benchmark ==="
-echo "Executable: $KMEANS_EXECUTABLE"
+echo "=== KMeans Scikit-Learn Performance Benchmark ==="
+echo "Script: $KMEANS_SCRIPT"
 echo "Dataset directory: $DATASET_DIR"
 echo "Init directory: $INIT_DIR"
 echo "Max iterations: $MAX_ITERATIONS"
-echo "Using GPU: Yes (USE_GPU=$USE_GPU)"
-echo "Using Triangle Inequality: Yes (USE_TRIANGLE=$USE_TRIANGLE)"
 echo "========================================="
 
-# Check if executable exists
-if [ ! -f "$KMEANS_EXECUTABLE" ]; then
-    echo "Error: $KMEANS_EXECUTABLE not found!"
+# Check if script exists
+if [ ! -f "$KMEANS_SCRIPT" ]; then
+    echo "Error: $KMEANS_SCRIPT not found!"
     exit 1
 fi
 
@@ -37,9 +34,9 @@ if [ ! -d "$INIT_DIR" ]; then
 fi
 
 # Create/overwrite output file with header
-echo "# KMeans Performance Summary" > "$OUTPUT_FILE"
+echo "# KMeans Scikit-Learn Performance Summary" > "$OUTPUT_FILE"
 echo "# Generated on $(date)" >> "$OUTPUT_FILE"
-echo "# Format: Filename | Dimensions | Num Clusters | Num Points | Algorithm Time (s) | Algorithm Time with GPU Warmup (s) | Iterations" >> "$OUTPUT_FILE"
+echo "# Format: Filename | Dimensions | Num Clusters | Num Points | Elapsed Time (s) | Iterations" >> "$OUTPUT_FILE"
 echo "----------------------------------------------------------------------------------" >> "$OUTPUT_FILE"
 
 # Find all dataset files
@@ -98,9 +95,9 @@ for dataset_file in $dataset_files; do
         clusters_arg=$num_clusters
     fi
     
-    # Run kmeans with GPU flag and Triangle Inequality flag
-    echo "Running: $KMEANS_EXECUTABLE $dataset_file $init_file $clusters_arg $MAX_ITERATIONS $USE_GPU $USE_TRIANGLE"
-    output=$("$KMEANS_EXECUTABLE" "$dataset_file" "$init_file" "$clusters_arg" "$MAX_ITERATIONS" "$USE_GPU" "$USE_TRIANGLE" 2>&1)
+    # Run Python kmeans script
+    echo "Running: $PYTHON_EXECUTABLE $KMEANS_SCRIPT $dataset_file $init_file $clusters_arg $MAX_ITERATIONS"
+    output=$("$PYTHON_EXECUTABLE" "$KMEANS_SCRIPT" "$dataset_file" "$init_file" "$clusters_arg" "$MAX_ITERATIONS" 2>&1)
     run_status=$?
     
     if [ $run_status -ne 0 ]; then
@@ -110,28 +107,27 @@ for dataset_file in $dataset_files; do
         continue
     fi
     
-    # Extract algorithm time without GPU loading
-    algo_time=$(echo "$output" | grep -E "^Algorithm time: " | awk '{print $3}')
+    # Extract elapsed time from output
+    elapsed_time=$(echo "$output" | grep "KMeans fitting time:" | awk '{print $4}')
     
-    # Extract algorithm time including warmup
-    algo_time_warmup=$(echo "$output" | grep -E "Algorithm time \(plus warmup\):" | awk '{print $5}')
+    # Extract iterations value
+    iterations=$(echo "$output" | grep "Number of iterations:" | awk '{print $4}')
     
-    # For iterations, since we don't have it in the output, use max iterations
-    iterations="$MAX_ITERATIONS"
-    
-    if [ -z "$algo_time" ]; then
-        echo "Warning: Could not extract algorithm time from output"
-        algo_time="N/A"
+    if [ -z "$elapsed_time" ]; then
+        echo "Warning: Could not extract elapsed time from output"
+        echo "Output:"
+        echo "$output"
+        continue
     fi
     
-    if [ -z "$algo_time_warmup" ]; then
-        echo "Warning: Could not extract algorithm time with GPU loading from output"
-        algo_time_warmup="N/A"
+    if [ -z "$iterations" ]; then
+        echo "Warning: Could not extract iterations count from output, using placeholder"
+        iterations="N/A"
     fi
     
     # Write results to output file
-    echo "$filename | $dimensions | $num_clusters | $num_points | $algo_time | $algo_time_warmup | $iterations" >> "$OUTPUT_FILE"
-    echo "Completed: Algorithm Time = $algo_time s, With GPU Loading = $algo_time_warmup s, Iterations = $iterations"
+    echo "$filename | $dimensions | $num_clusters | $num_points | $elapsed_time | $iterations" >> "$OUTPUT_FILE"
+    echo "Completed: Time = $elapsed_time s, Iterations = $iterations"
     echo "---------------------------------------------"
 done
 

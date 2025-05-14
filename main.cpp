@@ -132,13 +132,17 @@ int main(int argc, char* argv[]) {
         
         std::chrono::duration<double> load_to_gpu_time;
         std::chrono::duration<double> load_from_gpu_time;
+        std::chrono::duration<double> warmup_gpu_time = std::chrono::duration<double>::zero();
+
         if (useGPU) {
             // Separate data loading and GPU memory preparation from algorithm timing
             std::cout << "\nPreparing GPU memory (not included in timing)..." << std::endl;
             load_to_gpu_time = std::chrono::duration<double>(kmeans.prepareGPUMemory());
-
-            // NEW: Warm up GPU kernels before timing
+            
+            std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
             kmeans.warmupKernels();
+            std::chrono::high_resolution_clock::time_point end = std::chrono::high_resolution_clock::now();
+            warmup_gpu_time = end - start;
         }
         // Run the clustering algorithm with timing only the algorithm, not data transfers
         std::cout << "\nRunning K-means clustering..." << std::endl;
@@ -164,8 +168,12 @@ int main(int argc, char* argv[]) {
         // Calculate and display the algorithm duration only
         std::chrono::duration<double> elapsed = end - start;
         std::chrono::duration<double> elapsed_with_loading = end - start + load_to_gpu_time + load_from_gpu_time;
+        std::chrono::duration<double> elapsed_with_loading_and_warmup = end - start + load_to_gpu_time + load_from_gpu_time + warmup_gpu_time;
+        std::chrono::duration<double> elapsed_and_warmup = end - start + warmup_gpu_time;
         std::cout << "\nAlgorithm time: " << elapsed.count() << " seconds" << std::endl;
         std::cout << "\nAlgorithm time (including gpu loading transfers): " << elapsed_with_loading.count() << " seconds" << std::endl;
+        std::cout << "\nAlgorithm time (plus warmup): " << elapsed_and_warmup.count() << " seconds" << std::endl;
+        std::cout << "\nAlgorithm time (including gpu loading transfers and warmup): " << elapsed_with_loading_and_warmup.count() << " seconds" << std::endl;
         std::cout << "Clustering completed." << std::endl;
         std::cout << "------------------------" << std::endl;
 

@@ -4,10 +4,10 @@
 KMEANS_EXECUTABLE="./kmeans"
 DATASET_DIR="../datasets_100_clusters"
 INIT_DIR="../datasets_100_clusters_init"
-OUTPUT_FILE="kmeans_performance_summary.txt"
+OUTPUT_FILE="kmeans_performance_summary_ablation.txt"
 MAX_ITERATIONS=20
 USE_GPU=1          # Set to 1 to use GPU acceleration
-USE_TRIANGLE=1     # Set to 1 to use Triangle Inequality optimization
+USE_TRIANGLE=0     # Set to 1 to use Triangle Inequality optimization
 
 echo "=== KMeans Performance Benchmark ==="
 echo "Executable: $KMEANS_EXECUTABLE"

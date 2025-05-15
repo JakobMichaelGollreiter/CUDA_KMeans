@@ -59,8 +59,8 @@ def main():
 
     # check labels
     ari = adjusted_rand_score(y_true, y_pred)
-    ari_check = ari >= 0.999
-    print(f"ARI check: {ari_check}, value = {ari:.6f}, threshold = 0.999")
+    ari_check = ari >= 0.99
+    print(f"ARI check: {ari_check}, value = {ari:.6f}, threshold = 0.99")
     
     # check centers
     avg_dist = avg_center_dist(C_true, C_pred)

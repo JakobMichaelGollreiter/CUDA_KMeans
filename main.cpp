@@ -1,112 +1,223 @@
 #include "kmeans.h"
-#include "data_generator.h"
 #include <vector>
 #include <iostream>
 #include <string>
+#include <stdexcept>
+#include <sys/stat.h>  // For mkdir
+#include <unistd.h>    // For access
+#include <chrono>
+
+// Extract filename without extension
+std::string getFilenameStem(const std::string& path) {
+    size_t lastSlash = path.find_last_of("/\\");
+    size_t lastDot = path.find_last_of('.');
+    if (lastDot == std::string::npos || lastDot < lastSlash) lastDot = path.length();
+    return path.substr(lastSlash + 1, lastDot - lastSlash - 1);
+}
+
+// Create directory if it doesn't exist
+void makeDirectory(const std::string& dir) {
+    if (access(dir.c_str(), F_OK) != 0) {
+        mkdir(dir.c_str(), 0755); // 0755 = rwxr-xr-x
+    }
+}
 
 int main(int argc, char* argv[]) {
-    // Parameters for clustering
-    int numClusters = 3;
-    int pointsPerCluster = 10;
-    
-    // Seed for reproducibility (default: 12345)
-    unsigned int seed = 12345;
-    
-    // Allow seed to be specified as command line argument
-    if (argc > 1) {
-        try {
-            seed = std::stoi(argv[1]);
-        } catch (const std::exception& e) {
-            std::cerr << "Invalid seed parameter. Using default: " << seed << std::endl;
-        }
+    // Check command line arguments
+    if (argc < 3 || argc > 8) {
+        std::cerr << "Usage: " << argv[0] << " <data_file.csv> <centroids_file.csv> <num_clusters> [max_iterations] [use_gpu] [use_triangle] [batch_size]" << std::endl;
+        std::cerr << "  <data_file.csv>     : Path to CSV file containing data points" << std::endl;
+        std::cerr << "  <centroids_file.csv>: Path to CSV file containing initial centroids" << std::endl;
+        std::cerr << "  <num_clusters>      : Number of clusters (k)" << std::endl;
+        std::cerr << "  [max_iterations]    : Maximum iterations (default: 100)" << std::endl;
+        std::cerr << "  [use_gpu]           : Use GPU acceleration if available (0 or 1, default: 0)" << std::endl;
+        std::cerr << "  [use_triangle]      : Use Triangle Inequality optimization (0 or 1, default: 0)" << std::endl;
+        std::cerr << "  [batch_size]        : Mini-batch size for large datasets (0=auto, default: 0)" << std::endl;
+        return 1;
     }
     
-    // Create a KMeans instance
-    KMeans kmeans(numClusters);
-    
-    // Define cluster centers (means for Gaussian distributions)
-    std::vector<std::vector<double>> clusterCenters = {
-        {2.0, 2.0},     // Cluster 0 center
-        {8.0, 8.0},     // Cluster 1 center
-        {-5.0, -5.0}    // Cluster 2 center
-    };
-    
-    // Standard deviations for each cluster
-    std::vector<double> stdDevs = {0.1, 0.2, 0.8};
-    
-    // Initialize data generator with specified seed
-    DataGenerator generator(seed);
-    
-    // Print information about the clusters we're generating
-    std::cout << "Generating " << pointsPerCluster << " points for each of " 
-              << numClusters << " clusters with seed " << seed << "...\n";
-    generator.printClusterInfo(clusterCenters, stdDevs);
-    
-    // Generate synthetic data points
-    std::vector<std::vector<double>> dataPoints = 
-        generator.generateGaussianClusters(clusterCenters, stdDevs, pointsPerCluster);
-    
-    // Add all generated points to the kmeans object
-    for (const auto& point : dataPoints) {
-        kmeans.addPoint(point);
-    }
-    
-    // Run the clustering algorithm
-    std::cout << "\nRunning K-means clustering...\n" << std::endl;
-    kmeans.run();
-    
-    // Get cluster assignments and centroids
-    auto assignments = kmeans.getClusterAssignments();
-    auto centroids = kmeans.getCentroids();
-    
-    // Print each cluster's centroid
-    std::cout << "\nEstimated cluster centroids from K-means:" << std::endl;
-    std::cout << "-----------------------------------------" << std::endl;
-    for (size_t i = 0; i < centroids.size(); i++) {
-        std::cout << "Centroid " << i << ": (";
-        for (size_t j = 0; j < centroids[i].size(); j++) {
-            std::cout << centroids[i][j];
-            if (j < centroids[i].size() - 1) std::cout << ", ";
-        }
-        std::cout << ")" << std::endl;
-    }
-    
-    // Count points in each cluster
-    std::vector<int> clusterCounts(numClusters, 0);
-    for (int cluster : assignments) {
-        clusterCounts[cluster]++;
-    }
-    
-    // Print cluster statistics
-    std::cout << "\nCluster point counts:" << std::endl;
-    std::cout << "---------------------" << std::endl;
-    for (int i = 0; i < numClusters; i++) {
-        std::cout << "Cluster " << i << ": " << clusterCounts[i] << " points" << std::endl;
-    }
-    
-    // Print sample points from each cluster
-    std::cout << "\nSample points from each cluster:" << std::endl;
-    std::cout << "-------------------------------" << std::endl;
-    for (size_t c = 0; c < centroids.size(); c++) {
-        std::cout << "Cluster " << c << " samples:" << std::endl;
+    try {
+        // Parse command line arguments
+        std::string dataFile = argv[1];
+        std::string centroidsFile = argv[2];
         
-        int count = 0;
-        for (size_t i = 0; i < assignments.size(); i++) {
-            if (assignments[i] == static_cast<int>(c)) {
-                std::cout << "  Point (";
-                for (size_t j = 0; j < dataPoints[i].size(); j++) {
-                    std::cout << dataPoints[i][j];
-                    if (j < dataPoints[i].size() - 1) std::cout << ", ";
+        int numClusters;
+        try {
+            numClusters = std::stoi(argv[3]);
+        } catch (const std::exception& e) {
+            std::cerr << "Error: Invalid number of clusters. Must be a positive integer." << std::endl;
+            return 1;
+        }
+        
+        if (numClusters <= 0) {
+            std::cerr << "Error: Number of clusters must be positive." << std::endl;
+            return 1;
+        }
+        
+        // Optional argument for max iterations
+        int maxIterations = 100;  // Default value
+        if (argc >= 5) {
+            try {
+                maxIterations = std::stoi(argv[4]);
+                if (maxIterations <= 0) {
+                    std::cerr << "Error: Maximum iterations must be positive. Using default: 100" << std::endl;
+                    maxIterations = 100;
                 }
-                std::cout << ")" << std::endl;
-                
-                count++;
-                // if (count >= 5) break;  // Show only first 5 points per cluster
+            } catch (const std::exception& e) {
+                std::cerr << "Error: Invalid maximum iterations. Using default: 100" << std::endl;
             }
         }
+        
+        // Optional argument for GPU usage
+        bool useGPU = false;  // Default value
+        if (argc >= 6) {
+            try {
+                useGPU = (std::stoi(argv[5]) != 0);
+            } catch (const std::exception& e) {
+                std::cerr << "Error: Invalid GPU flag. Using default: CPU" << std::endl;
+            }
+        }
+        
+        // Optional argument for Triangle Inequality optimization
+        bool useTriangleInequality = false;  // Default value
+        if (argc >= 7) {
+            try {
+                useTriangleInequality = (std::stoi(argv[6]) != 0);
+            } catch (const std::exception& e) {
+                std::cerr << "Error: Invalid Triangle Inequality flag. Using default: No optimization" << std::endl;
+            }
+        }
+        
+        // Optional argument for batch size
+        int batchSize = 0;  // Default value (0 = auto)
+        if (argc >= 8) {
+            try {
+                batchSize = std::stoi(argv[7]);
+                if (batchSize < 0) {
+                    std::cerr << "Error: Batch size must be non-negative. Using default: 0 (auto)" << std::endl;
+                    batchSize = 0;
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "Error: Invalid batch size. Using default: 0 (auto)" << std::endl;
+            }
+        }
+        
+        // Check if CUDA is available if GPU requested
+        if (useGPU && !KMeans::isCUDAAvailable()) {
+            std::cerr << "Warning: CUDA is not available on this system. Falling back to CPU implementation." << std::endl;
+            useGPU = false;
+        }
+        
+        // Create a KMeans instance
+        KMeans kmeans(numClusters, maxIterations, 1e-4, useGPU, useTriangleInequality);
+        
+        // Set batch size if specified
+        if (batchSize > 0) {
+            kmeans.setBatchSize(batchSize);
+        }
+        
+        // Load data points from CSV file
+        std::cout << "Loading data points from " << dataFile << "..." << std::endl;
+        if (!kmeans.loadDataFromCSV(dataFile)) {
+            std::cerr << "Failed to load data points." << std::endl;
+            return 1;
+        }
+        
+        // Load initial centroids from CSV file
+        std::cout << "Loading initial centroids from " << centroidsFile << "..." << std::endl;
+        if (!kmeans.loadCentroidsFromCSV(centroidsFile)) {
+            std::cerr << "Failed to load centroids." << std::endl;
+            return 1;
+        }
+        
+        std::chrono::duration<double> load_to_gpu_time;
+        std::chrono::duration<double> load_from_gpu_time;
+        std::chrono::duration<double> warmup_gpu_time = std::chrono::duration<double>::zero();
+
+        if (useGPU) {
+            // Separate data loading and GPU memory preparation from algorithm timing
+            std::cout << "\nPreparing GPU memory (not included in timing)..." << std::endl;
+            load_to_gpu_time = std::chrono::duration<double>(kmeans.prepareGPUMemory());
+            
+            std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
+            kmeans.warmupKernels();
+            std::chrono::high_resolution_clock::time_point end = std::chrono::high_resolution_clock::now();
+            warmup_gpu_time = end - start;
+        }
+        // Run the clustering algorithm with timing only the algorithm, not data transfers
+        std::cout << "\nRunning K-means clustering..." << std::endl;
+        std::cout << (useGPU ? "Using GPU acceleration" : "Using CPU implementation") << std::endl;
+        std::cout << (useTriangleInequality ? "Using Triangle Inequality optimization" : "Using standard K-means") << std::endl;
+
+        // Start timing
+        auto start = std::chrono::high_resolution_clock::now();
+
+        // Run only the algorithm (Lloyd's iterations)
+        kmeans.runAlgorithm();
+
+        // End timing
+        auto end = std::chrono::high_resolution_clock::now();
+        
+        if (useGPU) {
+            // If using GPU, copy results back (not included in timing)
+            std::cout << "Copying results from GPU (not included in timing)..." << std::endl;
+            
+            load_from_gpu_time = std::chrono::duration<double>(kmeans.retrieveResultsFromGPU());
+        }
+
+        // Calculate and display the algorithm duration only
+        std::chrono::duration<double> elapsed = end - start;
+        std::chrono::duration<double> elapsed_with_loading = end - start + load_to_gpu_time + load_from_gpu_time;
+        std::chrono::duration<double> elapsed_with_loading_and_warmup = end - start + load_to_gpu_time + load_from_gpu_time + warmup_gpu_time;
+        std::chrono::duration<double> elapsed_and_warmup = end - start + warmup_gpu_time;
+        std::cout << "\nAlgorithm time: " << elapsed.count() << " seconds" << std::endl;
+        std::cout << "\nAlgorithm time (including gpu loading transfers): " << elapsed_with_loading.count() << " seconds" << std::endl;
+        std::cout << "\nAlgorithm time (plus warmup): " << elapsed_and_warmup.count() << " seconds" << std::endl;
+        std::cout << "\nAlgorithm time (including gpu loading transfers and warmup): " << elapsed_with_loading_and_warmup.count() << " seconds" << std::endl;
+        std::cout << "Clustering completed." << std::endl;
+        std::cout << "------------------------" << std::endl;
+
+        // Get cluster assignments and centroids
+        auto assignments = kmeans.getClusterAssignments();
+        auto centroids = kmeans.getCentroids();
+        
+        // Count points in each cluster
+        std::vector<int> clusterCounts(numClusters, 0);
+        for (int cluster : assignments) {
+            if (cluster >= 0 && cluster < numClusters) {
+                clusterCounts[cluster]++;
+            }
+        }
+        
+        // // Print cluster statistics
+        // std::cout << "\nCluster point counts:" << std::endl;
+        // std::cout << "---------------------" << std::endl;
+        // for (int i = 0; i < numClusters; i++) {
+        //     std::cout << "Cluster " << i << ": " << clusterCounts[i] << " points" << std::endl;
+        // }
+        
+        std::cout << "\nSum of Squared Errors (SSE): " << kmeans.calculateSSE() << std::endl;
+        
+        // // Extract filename
+        // std::string filename = getFilenameStem(dataFile);
+
+        // // Create output directories
+        // std::string clusteOutputDir = "../label_predictions";
+        // std::string centroidsOutputDir = "../center_predictions";
+
+        // makeDirectory(clusteOutputDir);
+        // makeDirectory(centroidsOutputDir);
+
+        // // Construct file paths
+        // std::string outputClustersFile = clusteOutputDir + "/" + filename + "_labels.csv";
+        // std::string outputCentroidsFile = centroidsOutputDir + "/" + filename + "_centers.csv";
+
+        // kmeans.saveClusterAssignmentsToCSV(outputClustersFile);
+        // kmeans.saveCentroidsToCSV(outputCentroidsFile);
+            
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "Error: " << e.what() << std::endl;
+        return 1;
     }
-    
-    std::cout << "\nSum of Squared Errors: " << kmeans.calculateSSE() << std::endl;
-    
-    return 0;
 }
